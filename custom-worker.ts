@@ -1,3 +1,5 @@
+
+ // @ts-ignore OpenNext bu dosyayı Cloudflare derlemesi sırasında oluşturur.
 import handler from "./.open-next/worker.js";
 
 interface Env {
@@ -34,5 +36,5 @@ export default {
   },
 };
 
-
+// @ts-ignore OpenNext bu exportları derleme sırasında oluşturur.
 export { DOQueueHandler, DOShardedTagCache } from "./.open-next/worker.js";
