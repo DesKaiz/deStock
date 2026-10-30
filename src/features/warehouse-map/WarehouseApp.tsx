@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Stage, Layer, Rect, Text, Group, Line } from "react-konva";
 import type { MapObject, MapObjectType, ProductEntry } from "@/types/warehouse";
@@ -39,13 +39,21 @@ type WarehousePatch = {
 
 export default function WarehouseApp() {
   const supabase = useMemo(() => (isCloudConfigured ? createClient() : null), []);
-  const [user, setUser] = useState<{ id: string; email?: string } | null>(null);
+  const [user, setUser] = useState<{ id: string; email?: string; inviteCode?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(isCloudConfigured));
   const [authBusy, setAuthBusy] = useState(false);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteCodeInput, setInviteCodeInput] = useState("");
+  const [createdInviteCode, setCreatedInviteCode] = useState("");
+  const [inviteCodeBusy, setInviteCodeBusy] = useState(false);
+  const [inviteCodeMessage, setInviteCodeMessage] = useState("");
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panGesture = useRef<{ kind: "mouse" | "touch" | null; lastX: number; lastY: number }>({ kind: null, lastX: 0, lastY: 0 });
+  const [isSettingPassword, setIsSettingPassword] = useState(false);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
+  const [membershipRole, setMembershipRole] = useState<string | null>(null);
   const [warehouseId, setWarehouseId] = useState<string | null>(null);
   const [storageUnitIds, setStorageUnitIds] = useState<Record<string, string>>({});
   const [dataLoading, setDataLoading] = useState(false);
@@ -62,27 +70,73 @@ export default function WarehouseApp() {
   const [unknownQuantity, setUnknownQuantity] = useState(false);
   const [notice, setNotice] = useState(isCloudConfigured ? "Hesap bağlantısı bekleniyor." : "Yerel demo modu: değişiklikler buluta kaydedilmiyor.");
   const [showAllProducts, setShowAllProducts] = useState(false);
+  const canManageWarehouse = !isCloudConfigured || ["owner", "manager"].includes(membershipRole ?? "");
+  const canEditOperations = !isCloudConfigured || ["owner", "manager", "worker"].includes(membershipRole ?? "");
 
-  // Oturum bilgisini al ve giriş/çıkış değişikliklerini dinle.
-  useEffect(() => {
-    if (!supabase) return;
-    let alive = true;
-    supabase.auth.getSession().then(({ data, error }) => {
+// Oturum bilgisini al ve giriş/çıkış değişikliklerini dinle.
+useEffect(() => {
+  if (!supabase) return;
+
+  let alive = true;
+
+  supabase.auth.getSession().then(({ data, error }) => {
+    if (!alive) return;
+
+    if (error) setDataError(error.message);
+
+    const session = data.session;
+
+    if (session?.user) {
+      setUser({
+        id: session.user.id,
+        email: session.user.email,
+        inviteCode: typeof session.user.user_metadata?.depomap_invite_code === "string" ? session.user.user_metadata.depomap_invite_code : undefined,
+      });
+
+      if (
+        session.user.invited_at &&
+        !session.user.user_metadata?.password_set
+      ) {
+        setIsSettingPassword(true);
+      }
+    } else {
+      setUser(null);
+    }
+
+    setAuthLoading(false);
+  });
+
+  const { data: authListener } = supabase.auth.onAuthStateChange(
+    (event, session) => {
       if (!alive) return;
-      if (error) setDataError(error.message);
-      setUser(data.session?.user ? { id: data.session.user.id, email: data.session.user.email } : null);
+
+      setUser(
+        session?.user
+          ? {
+              id: session.user.id,
+              email: session.user.email,
+              inviteCode: typeof session.user.user_metadata?.depomap_invite_code === "string" ? session.user.user_metadata.depomap_invite_code : undefined,
+            }
+          : null
+      );
+
+      if (event === "PASSWORD_RECOVERY") {
+  setIsSettingPassword(true);
+}
+
+if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
+  setIsSettingPassword(false);
+}
+
       setAuthLoading(false);
-    });
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!alive) return;
-      setUser(session?.user ? { id: session.user.id, email: session.user.email } : null);
-      setAuthLoading(false);
-    });
-    return () => {
-      alive = false;
-      authListener.subscription.unsubscribe();
-    };
-  }, [supabase]);
+    }
+  );
+
+  return () => {
+    alive = false;
+    authListener.subscription.unsubscribe();
+  };
+}, [supabase]);
 
   // Kullanıcının organizasyonunu, deposunu ve harita/ürün verilerini yükle.
   useEffect(() => {
@@ -165,6 +219,17 @@ export default function WarehouseApp() {
       setDataLoading(true);
       setDataError(null);
       try {
+        // Davet kodu varsa önce kodu kullan; üyelik bundan sonra kalıcıdır.
+        if (user!.inviteCode) {
+          const { error: redeemError } = await supabase!.rpc("depomap_redeem_invite_code", {
+            p_code: user!.inviteCode,
+          });
+          if (redeemError && !redeemError.message.toLocaleLowerCase("tr").includes("zaten üyesiniz")) {
+            throw redeemError;
+          }
+          await supabase!.auth.updateUser({ data: { depomap_invite_code: null } });
+        }
+
         const { data: membership, error: membershipError } = await supabase!
           .from("memberships")
           .select("organization_id,role")
@@ -172,6 +237,7 @@ export default function WarehouseApp() {
           .limit(1)
           .maybeSingle();
         if (membershipError) throw membershipError;
+        setMembershipRole(membership?.role ?? "owner");
 
         let orgId = membership?.organization_id as string | undefined;
         let whId: string | undefined;
@@ -247,25 +313,54 @@ export default function WarehouseApp() {
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     if (!supabase) return;
+
     setAuthBusy(true);
     setDataError(null);
+
     try {
       if (authMode === "signup") {
-        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim().toLowerCase(),
+          password,
+          options: {
+            data: inviteCodeInput.trim()
+              ? { depomap_invite_code: inviteCodeInput.trim().toUpperCase() }
+              : {},
+          },
+        });
+
         if (error) throw error;
+
         if (!data.session) {
-          setNotice("Hesap oluşturuldu. Supabase e-posta doğrulaması istiyorsa gelen kutunu kontrol et, ardından giriş yap.");
+          setNotice(
+            inviteCodeInput.trim()
+              ? "Hesap oluşturuldu. E-posta doğrulamasından sonra davet kodun otomatik işlenecek."
+              : "Hesap oluşturuldu. E-posta doğrulaması gerekiyorsa gelen kutunu kontrol et."
+          );
         } else {
-          setNotice("Hesap oluşturuldu. Depo hazırlanıyor.");
+          setNotice(inviteCodeInput.trim() ? "Davet kodu kontrol ediliyor ve depoya katılım hazırlanıyor." : "Hesap oluşturuldu. Depo hazırlanıyor.");
         }
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
+
         if (error) throw error;
+
         setNotice("Giriş başarılı. Depo verileri yükleniyor.");
       }
+
+      setPassword("");
+      if (authMode === "signup") setInviteCodeInput("");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Kimlik doğrulama başarısız.";
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Kimlik doğrulama başarısız.";
+
       setDataError(message);
       setNotice(message);
     } finally {
@@ -273,12 +368,77 @@ export default function WarehouseApp() {
     }
   }
 
-  async function signOut() {
-    if (!supabase) return;
-    const { error } = await supabase.auth.signOut();
-    if (error) setNotice(`Çıkış yapılamadı: ${error.message}`);
+  async function handleSetPassword(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+
+  if (!supabase) return;
+
+  setAuthBusy(true);
+  setDataError(null);
+
+  try {
+    const { error } = await supabase.auth.updateUser({
+  password,
+  data: { password_set: true },
+  });
+
+    if (error) throw error;
+
+    setPassword("");
+    setIsSettingPassword(false);
+    setNotice("Şifren başarıyla oluşturuldu. Depo yükleniyor.");
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Şifre kaydedilemedi.";
+
+    setDataError(message);
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+  async function handleCreateInviteCode() {
+    if (!supabase || !organizationId || !["owner", "manager"].includes(membershipRole ?? "")) {
+      setInviteCodeMessage("Davet kodu oluşturma yetkin yok.");
+      return;
+    }
+    setInviteCodeBusy(true);
+    setInviteCodeMessage("");
+    setCreatedInviteCode("");
+    try {
+      const { data, error } = await supabase.rpc("depomap_create_invite_code", {
+        p_organization_id: organizationId,
+        p_role: "worker",
+      });
+      if (error) throw error;
+      setCreatedInviteCode(String(data));
+      setInviteCodeMessage("Kod 7 gün boyunca yeni bir çalışanın katılımı için geçerlidir. Katılan çalışanın üyeliği kalıcıdır.");
+    } catch (error) {
+      setInviteCodeMessage(error instanceof Error ? error.message : "Davet kodu oluşturulamadı.");
+    } finally {
+      setInviteCodeBusy(false);
+    }
   }
 
+  async function copyInviteCode() {
+    if (!createdInviteCode) return;
+    try {
+      await navigator.clipboard.writeText(createdInviteCode);
+      setInviteCodeMessage("Davet kodu panoya kopyalandı.");
+    } catch {
+      setInviteCodeMessage("Kod kopyalanamadı. Kodu seçip elle kopyalayabilirsin.");
+    }
+  }
+
+  async function signOut() {
+  if (!supabase) return;
+
+  const { error } = await supabase.auth.signOut();
+
+  if (error) {
+    setNotice(`Çıkış yapılamadı: ${error.message}`);
+  }
+  }
   const selected = objects.find((o) => o.id === selectedId) ?? null;
   const allProducts = useMemo(() => objects.flatMap((o) => o.products.map((p) => ({ ...p, objectId: o.id, objectLabel: o.label, objectType: o.type }))), [objects]);
   const results = search.trim()
@@ -453,11 +613,45 @@ export default function WarehouseApp() {
     });
   }
 
+  function startMapMousePan(e: React.MouseEvent<HTMLDivElement>) {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    panGesture.current = { kind: "mouse", lastX: e.clientX, lastY: e.clientY };
+  }
+
+  function moveMapMousePan(e: React.MouseEvent<HTMLDivElement>) {
+    if (panGesture.current.kind !== "mouse") return;
+    setPan((current) => ({ x: current.x + e.clientX - panGesture.current.lastX, y: current.y + e.clientY - panGesture.current.lastY }));
+    panGesture.current.lastX = e.clientX;
+    panGesture.current.lastY = e.clientY;
+  }
+
+  function endMapPan() { panGesture.current.kind = null; }
+
+  function touchCenter(touches: React.TouchList) {
+    return { x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 };
+  }
+
+  function startMapTouchPan(e: React.TouchEvent<HTMLDivElement>) {
+    if (e.touches.length !== 2) return;
+    const center = touchCenter(e.touches);
+    panGesture.current = { kind: "touch", lastX: center.x, lastY: center.y };
+  }
+
+  function moveMapTouchPan(e: React.TouchEvent<HTMLDivElement>) {
+    if (e.touches.length !== 2 || panGesture.current.kind !== "touch") return;
+    e.preventDefault();
+    const center = touchCenter(e.touches);
+    setPan((current) => ({ x: current.x + center.x - panGesture.current.lastX, y: current.y + center.y - panGesture.current.lastY }));
+    panGesture.current.lastX = center.x;
+    panGesture.current.lastY = center.y;
+  }
+
   const canvasWidth = Math.max(300, widthM * SCALE);
   const canvasHeight = Math.max(240, lengthM * SCALE);
 
   if (isCloudConfigured && authLoading) {
-    return <main className="app-shell"><section className="panel" style={{ maxWidth: 520, margin: "12vh auto", padding: 32 }}><h1>DepoMap</h1><p>Oturum kontrol ediliyor...</p></section></main>;
+    return <main className="app-shell"><section className="panel" style={{ maxWidth: 520, margin: "12vh auto", padding: 32 }}><h1>deStock</h1><p>Oturum kontrol ediliyor...</p></section></main>;
   }
 
   if (isCloudConfigured && !user) {
@@ -465,12 +659,13 @@ export default function WarehouseApp() {
       <main className="app-shell">
         <section className="panel" style={{ maxWidth: 480, margin: "8vh auto", padding: 32 }}>
           <div className="brand-mark" style={{ marginBottom: 16 }}>D</div>
-          <p className="eyebrow">DEPOMAP / BULUT HESABI</p>
+          <p className="eyebrow">DESTOCK / BULUT HESABI</p>
           <h1 style={{ marginBottom: 8 }}>{authMode === "signin" ? "Hesabına giriş yap" : "Yeni hesap oluştur"}</h1>
           <p className="subtitle">Depo bilgilerin hesabına kaydedilir ve yetkili ekip üyeleriyle senkronize edilir.</p>
           <form onSubmit={handleAuthSubmit} style={{ display: "grid", gap: 14, marginTop: 24 }}>
             <label className="field-label">E-posta<input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
             <label className="field-label">Şifre<input type="password" autoComplete={authMode === "signin" ? "current-password" : "new-password"} minLength={6} required value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+            {authMode === "signup" && <label className="field-label">Davet kodu <span style={{ color: "#999", fontWeight: 400 }}>(çalışan hesabı için)</span><input autoCapitalize="characters" placeholder="DSK-XXXXXXXXXXXX" value={inviteCodeInput} onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())} /></label>}
             <button className="primary-button full-button" type="submit" disabled={authBusy}>{authBusy ? "İşleniyor..." : authMode === "signin" ? "Giriş yap" : "Hesap oluştur"}</button>
           </form>
           <button type="button" className="secondary-button full-button" style={{ marginTop: 12 }} onClick={() => { setAuthMode(authMode === "signin" ? "signup" : "signin"); setDataError(null); }}>
@@ -484,29 +679,79 @@ export default function WarehouseApp() {
     );
   }
 
-  if (isCloudConfigured && user && dataLoading) {
-    return <main className="app-shell"><section className="panel" style={{ maxWidth: 520, margin: "12vh auto", padding: 32 }}><h1>DepoMap</h1><p>Depo ve ürün bilgileri buluttan yükleniyor...</p></section></main>;
-  }
+  if (isCloudConfigured && user && isSettingPassword) {
+  return (
+    <main className="app-shell">
+      <section
+        className="panel"
+        style={{ maxWidth: 480, margin: "8vh auto", padding: 32 }}
+      >
+        <div className="brand-mark" style={{ marginBottom: 16 }}>D</div>
+        <p className="eyebrow">DESTOCK / DAVET</p>
+        <h1>Şifreni belirle</h1>
+        <p className="subtitle">
+          Ekibine katılmak için hesabının şifresini oluştur.
+        </p>
 
-  if (isCloudConfigured && user && dataError) {
-    return (
-      <main className="app-shell">
-        <section className="panel" style={{ maxWidth: 560, margin: "10vh auto", padding: 32 }}>
-          <h1>Bulut bağlantısı kurulamadı</h1>
-          <p role="alert" style={{ color: "#b42318", marginTop: 12 }}>{dataError}</p>
-          <p className="helper-text" style={{ marginTop: 12 }}>Supabase SQL kurulumunun uygulandığını ve .env.local değişkenlerini kontrol et. Bu ekranda değişiklik yaparsan kaydedilmeyebilir.</p>
-          <button className="primary-button full-button" style={{ marginTop: 18 }} onClick={() => window.location.reload()}>Yeniden dene</button>
-          <button className="secondary-button full-button" style={{ marginTop: 10 }} onClick={signOut}>Çıkış yap</button>
-        </section>
-      </main>
-    );
-  }
+        <form
+          onSubmit={handleSetPassword}
+          style={{ display: "grid", gap: 14, marginTop: 24 }}
+        >
+          <label className="field-label">
+            Yeni şifre
+            <input
+              type="password"
+              autoComplete="new-password"
+              minLength={6}
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+
+          <button
+            className="primary-button full-button"
+            type="submit"
+            disabled={authBusy}
+          >
+            {authBusy ? "Kaydediliyor..." : "Şifremi oluştur"}
+          </button>
+        </form>
+
+        {dataError && (
+          <p role="alert" style={{ color: "#b42318", marginTop: 16 }}>
+            {dataError}
+          </p>
+        )}
+      </section>
+    </main>
+  );
+}
 
   return (
     <main className="app-shell">
+      <style jsx global>{`
+        .app-shell { min-height: 100vh; background: #090a0d !important; color: #f2f3f5 !important; }
+        .app-shell .panel, .app-shell .map-panel, .app-shell .search-panel { background: #14161b !important; color: #f2f3f5 !important; border: 1px solid #292d36 !important; box-shadow: 0 12px 36px rgba(0,0,0,.22); }
+        .app-shell .topbar { background: #0d0f13 !important; border-bottom: 1px solid #292d36 !important; }
+        .app-shell .brand-mark { background: linear-gradient(145deg,#ff555d,#a90f1c) !important; color: white !important; box-shadow: 0 0 22px rgba(220,35,48,.22); }
+        .app-shell .brand-copy strong, .app-shell h1, .app-shell h2, .app-shell h3 { color: #f7f7f8 !important; }
+        .app-shell .subtitle, .app-shell .helper-text, .app-shell .panel-kicker, .app-shell .field-label { color: #aeb3bd !important; }
+        .app-shell input, .app-shell select { background: #0d0f13 !important; color: #f5f5f6 !important; border: 1px solid #363b46 !important; }
+        .app-shell .primary-button { background: linear-gradient(135deg,#f0444e,#b81727) !important; border: 1px solid #f0444e !important; color: white !important; }
+        .app-shell .secondary-button, .app-shell .add-button { background: #1b1e25 !important; color: #f0f1f3 !important; border: 1px solid #383d48 !important; }
+        .app-shell .map-viewport { background: #0b0d11 !important; border: 1px solid #333844 !important; overflow: hidden !important; user-select: none; }
+        .app-shell .map-scroll { will-change: transform; }
+        .app-shell .metric-card, .app-shell .selected-object, .app-shell .product-row, .app-shell .search-result, .app-shell .invite-code-card { background: #1b1e25 !important; border-color: #343944 !important; color: #f2f3f5 !important; }
+        .app-shell .invite-code-card { display: grid; gap: 10px; padding: 14px; margin-top: 12px; border: 1px solid #71313a !important; border-radius: 12px; }
+        .app-shell .invite-code-card strong { color: #ff5a64; font: 700 20px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; overflow-wrap: anywhere; }
+        .app-shell .footer { color: #858b98 !important; border-top: 1px solid #292d36 !important; }
+        .app-shell .map-legend, .app-shell .map-footer { color: #b9bec8 !important; }
+        @media (max-width: 760px) { .app-shell .map-viewport { max-height: 58vh; } .app-shell .topbar { flex-wrap: wrap; gap: 8px; } .app-shell .map-header { gap: 10px; flex-wrap: wrap; } }
+      `}</style>
       <header className="topbar">
         <div className="brand-mark">D</div>
-        <div className="brand-copy"><strong>DepoMap</strong><span>Depo konum yönetimi</span></div>
+        <div className="brand-copy"><strong>deStock</strong><span>Depo konum yönetimi</span></div>
         <div className="topbar-spacer" />
         <button
           type="button"
@@ -532,28 +777,55 @@ export default function WarehouseApp() {
       <section className="workspace">
         <aside className="panel settings-panel">
           <div className="panel-heading"><div><span className="panel-kicker">01 / PLAN</span><h2>Depo ayarları</h2></div></div>
-          <label className="field-label">Depo adı<input value={warehouseName} onChange={(e) => updateWarehouse({ name: e.target.value })} /></label>
-          <div className="field-grid">
-            <label className="field-label">Genişlik (m)<input type="number" min="1" max="100" value={widthM} onChange={(e) => updateWarehouse({ width_m: Math.max(1, Number(e.target.value) || 1) })} /></label>
-            <label className="field-label">Uzunluk (m)<input type="number" min="1" max="100" value={lengthM} onChange={(e) => updateWarehouse({ length_m: Math.max(1, Number(e.target.value) || 1) })} /></label>
-          </div>
-          <label className="field-label">Izgara aralığı
-            <select value={gridM} onChange={(e) => updateWarehouse({ grid_size_m: Number(e.target.value) })}>
-              <option value={0.25}>25 cm</option><option value={0.5}>50 cm</option><option value={1}>1 metre</option>
-            </select>
-          </label>
+          {canManageWarehouse ? (
+            <>
+              <label className="field-label">Depo adı<input value={warehouseName} onChange={(e) => updateWarehouse({ name: e.target.value })} /></label>
+              <div className="field-grid">
+                <label className="field-label">Genişlik (m)<input type="number" min="1" max="100" value={widthM} onChange={(e) => updateWarehouse({ width_m: Math.max(1, Number(e.target.value) || 1) })} /></label>
+                <label className="field-label">Uzunluk (m)<input type="number" min="1" max="100" value={lengthM} onChange={(e) => updateWarehouse({ length_m: Math.max(1, Number(e.target.value) || 1) })} /></label>
+              </div>
+              <label className="field-label">Izgara aralığı
+                <select value={gridM} onChange={(e) => updateWarehouse({ grid_size_m: Number(e.target.value) })}>
+                  <option value={0.25}>25 cm</option><option value={0.5}>50 cm</option><option value={1}>1 metre</option>
+                </select>
+              </label>
+            </>
+          ) : <p className="helper-text">Depo ayarlarını yalnızca depo sahibi veya yönetici değiştirebilir.</p>}
           <div className="metric-grid">
             <div className="metric-card"><span>Alan</span><strong>{(widthM * lengthM).toLocaleString("tr-TR")} m²</strong></div>
             <div className="metric-card"><span>Nesne</span><strong>{objects.length}</strong></div>
           </div>
-          <div className="section-rule" />
-          <div className="panel-heading compact"><div><span className="panel-kicker">02 / EKLE</span><h2>Haritaya nesne</h2></div></div>
-          <div className="add-grid">
-            <button onClick={() => addObject("pallet")} className="add-button"><span className="object-icon pallet-icon">▦</span><span>Palet</span><b>+</b></button>
-            <button onClick={() => addObject("rack")} className="add-button"><span className="object-icon rack-icon">▤</span><span>Raf</span><b>+</b></button>
-            <button onClick={() => addObject("cart")} className="add-button"><span className="object-icon cart-icon">▱</span><span>Araba</span><b>+</b></button>
-          </div>
-          <p className="helper-text">Nesneleri harita üzerinde sürükle. Alt tuşunu basılı tutarak ızgara dışında konumlandırabilirsin.</p>
+          {isCloudConfigured && organizationId && ["owner", "manager"].includes(membershipRole ?? "") && (
+            <>
+              <div className="section-rule" />
+              <div className="panel-heading compact">
+                <div><span className="panel-kicker">EKİP YÖNETİMİ</span><h2>Çalışan daveti</h2></div>
+              </div>
+              <p className="helper-text">Tek kullanımlık kod oluştur. Çalışan hesap açarken kodu girerek bu depoya katılır.</p>
+              <button type="button" className="primary-button full-button" onClick={handleCreateInviteCode} disabled={inviteCodeBusy}>
+                {inviteCodeBusy ? "Kod oluşturuluyor..." : "＋ Davet kodu oluştur"}
+              </button>
+              {createdInviteCode && (
+                <div className="invite-code-card">
+                  <span className="panel-kicker">7 GÜN GEÇERLİ · TEK KULLANIM</span>
+                  <strong>{createdInviteCode}</strong>
+                  <button type="button" className="secondary-button full-button" onClick={copyInviteCode}>Kodu kopyala</button>
+                </div>
+              )}
+              {inviteCodeMessage && <p className="helper-text" role="status">{inviteCodeMessage}</p>}
+            </>
+          )}
+          {canEditOperations && <>
+            <div className="section-rule" />
+            <div className="panel-heading compact"><div><span className="panel-kicker">02 / EKLE</span><h2>Haritaya nesne</h2></div></div>
+            <div className="add-grid">
+              <button onClick={() => addObject("pallet")} className="add-button"><span className="object-icon pallet-icon">▦</span><span>Palet</span><b>+</b></button>
+              <button onClick={() => addObject("rack")} className="add-button"><span className="object-icon rack-icon">▤</span><span>Raf</span><b>+</b></button>
+              <button onClick={() => addObject("cart")} className="add-button"><span className="object-icon cart-icon">▱</span><span>Araba</span><b>+</b></button>
+            </div>
+            <p className="helper-text">Nesneleri harita üzerinde sürükle. Alt tuşunu basılı tutarak ızgara dışında konumlandırabilirsin.</p>
+          </>}
+          {!canEditOperations && <p className="helper-text">Görüntüleyici hesabı: harita salt okunur.</p>}
         </aside>
 
         <section className="map-panel">
@@ -561,35 +833,36 @@ export default function WarehouseApp() {
             <div><span className="panel-kicker">CANLI ÖNİZLEME</span><h2>{warehouseName || "Yeni depo"}</h2><p>{widthM} m × {lengthM} m · {gridM} m ızgara</p></div>
             <div className="map-legend"><span><i className="legend-dot pallet-dot" />Palet</span><span><i className="legend-dot rack-dot" />Raf</span><span><i className="legend-dot cart-dot" />Araba</span></div>
           </div>
-          <div className="map-viewport">
-            <div className="map-scroll" style={{ width: canvasWidth + 2, height: canvasHeight + 2 }}>
+          <div className="map-viewport" onMouseDown={startMapMousePan} onMouseMove={moveMapMousePan} onMouseUp={endMapPan} onMouseLeave={endMapPan} onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }} onTouchStart={startMapTouchPan} onTouchMove={moveMapTouchPan} onTouchEnd={endMapPan} style={{ touchAction: "pan-y", cursor: panGesture.current.kind === "mouse" ? "grabbing" : "grab" }}>
+            <div className="map-scroll" style={{ width: canvasWidth + 2, height: canvasHeight + 2, transform: `translate(${pan.x}px, ${pan.y}px)` }}>
               <Stage width={canvasWidth} height={canvasHeight} scaleX={1} scaleY={1}>
                 <Layer>
-                  <Rect x={0} y={0} width={canvasWidth} height={canvasHeight} fill="#f8fafc" stroke="#cbd5e1" strokeWidth={1} />
+                  <Rect x={0} y={0} width={canvasWidth} height={canvasHeight} fill="#111318" stroke="#3b3f49" strokeWidth={1} />
                   {Array.from({ length: Math.floor(widthM / gridM) + 1 }, (_, i) => (
-                    <Line key={`vx-${i}`} points={[i * gridM * SCALE, 0, i * gridM * SCALE, canvasHeight]} stroke="#e3e8ef" strokeWidth={0.7} listening={false} />
+                    <Line key={`vx-${i}`} points={[i * gridM * SCALE, 0, i * gridM * SCALE, canvasHeight]} stroke="#292d36" strokeWidth={0.7} listening={false} />
                   ))}
                   {Array.from({ length: Math.floor(lengthM / gridM) + 1 }, (_, i) => (
-                    <Line key={`hy-${i}`} points={[0, i * gridM * SCALE, canvasWidth, i * gridM * SCALE]} stroke="#e3e8ef" strokeWidth={0.7} listening={false} />
+                    <Line key={`hy-${i}`} points={[0, i * gridM * SCALE, canvasWidth, i * gridM * SCALE]} stroke="#292d36" strokeWidth={0.7} listening={false} />
                   ))}
                   {objects.map((obj) => {
                     const isSelected = selectedId === obj.id;
                     const fill = OBJECT_COLORS[obj.type];
                     return (
                       <Group key={obj.id} x={obj.x * SCALE} y={obj.y * SCALE} rotation={obj.rotation}
-                        draggable
+                        draggable={canEditOperations}
                         onClick={() => setSelectedId(obj.id)}
                         onTap={() => setSelectedId(obj.id)}
                         onDragEnd={(e) => {
+                          if (!canEditOperations) return;
                           const node = e.target;
                           const free = Boolean(e.evt.altKey);
                           moveObject(obj.id, node.x() / SCALE, node.y() / SCALE, free);
                           node.position({ x: obj.x * SCALE, y: obj.y * SCALE });
                         }}>
                         <Rect width={obj.width * SCALE} height={obj.length * SCALE} fill={fill} opacity={0.88}
-                          stroke={isSelected ? "#111827" : "#ffffff"} strokeWidth={isSelected ? 3 : 1.5} cornerRadius={5} />
+                          stroke={isSelected ? "#ff424b" : "#858b98"} strokeWidth={isSelected ? 3 : 1.5} cornerRadius={5} />
                         <Text text={obj.label} width={obj.width * SCALE} height={obj.length * SCALE} align="center" verticalAlign="middle"
-                          fontSize={Math.max(9, Math.min(13, obj.width * 7))} fill="#17202c" listening={false} />
+                          fontSize={Math.max(9, Math.min(13, obj.width * 7))} fill="#f2f3f5" listening={false} />
                       </Group>
                     );
                   })}
@@ -597,7 +870,7 @@ export default function WarehouseApp() {
               </Stage>
             </div>
           </div>
-          <div className="map-footer"><span><kbd>Drag</kbd> Taşı</span><span><kbd>Click</kbd> Seç</span><span>Ölçek: 1 m = {SCALE}px</span></div>
+          <div className="map-footer"><span><kbd>Orta tuş</kbd> Kaydır</span><span><kbd>2 parmak</kbd> Kaydır</span><span><kbd>Tek parmak</kbd> Sayfayı kaydır</span><span>1 m = {SCALE}px</span></div>
         </section>
 
         <aside className="panel detail-panel">
@@ -608,6 +881,8 @@ export default function WarehouseApp() {
                 <span className={`object-icon large ${selected.type}-icon`}>{selected.type === "pallet" ? "▦" : selected.type === "rack" ? "▤" : "▱"}</span>
                 <div><strong>{selected.label}</strong><span>{selected.type === "pallet" ? "Palet" : selected.type === "rack" ? "Raf" : selected.type === "cart" ? "Market arabası" : selected.type}</span></div>
               </div>
+              {canEditOperations ? (
+                <>
               <label className="field-label">Etiket<input value={selected.label} onChange={(e) => updateObject(selected.id, { label: e.target.value })} /></label>
               <div className="field-grid">
                 <label className="field-label">X (m)<input type="number" step="0.1" value={selected.x} onChange={(e) => updateObject(selected.id, { x: Math.max(0, Math.min(widthM - selected.width, Number(e.target.value) || 0)) })} /></label>
@@ -624,6 +899,10 @@ export default function WarehouseApp() {
               >
                 × Seçili nesneyi kaldır
               </button>
+                </>
+              ) : (
+                <p className="helper-text">Bu hesapta nesne düzenleme yetkisi yok.</p>
+              )}
               <div className="section-rule" />
               <div className="panel-heading compact"><div><span className="panel-kicker">ÜRÜN İÇERİĞİ</span><h2>Ürünler <span className="count-badge">{selected.products.length}</span></h2></div></div>
               <div className="product-list">
@@ -631,16 +910,16 @@ export default function WarehouseApp() {
                 {selected.products.map((p) => (
                   <div className="product-row" key={p.id}>
                     <div className="product-symbol">P</div><div className="product-copy"><strong>{p.name}</strong><span>{p.quantity === null ? "Miktar bilinmiyor" : `${p.quantity} ${p.unit}`}</span></div>
-                    <button className="icon-button" title="Ürünü bu konumdan çıkar" onClick={() => removeProduct(p.id)}>×</button>
+                    {canEditOperations && <button className="icon-button" title="Ürünü bu konumdan çıkar" onClick={() => removeProduct(p.id)}>×</button>}
                   </div>
                 ))}
               </div>
-              <div className="add-product-form">
+              {canEditOperations && <div className="add-product-form">
                 <label className="field-label">Ürün adı<input placeholder="Örn. Sakız" value={productName} onChange={(e) => setProductName(e.target.value)} /></label>
                 <label className="field-label">Miktar (isteğe bağlı)<input type="number" min="0" step="1" disabled={unknownQuantity} placeholder="Örn. 12" value={quantity} onChange={(e) => setQuantity(e.target.value)} /></label>
                 <label className="check-label"><input type="checkbox" checked={unknownQuantity} onChange={(e) => setUnknownQuantity(e.target.checked)} /> Miktarı bilmiyorum</label>
                 <button className="primary-button full-button" onClick={addProduct}>+ Ürün ekle</button>
-              </div>
+              </div>}
             </>
           ) : <p className="empty-state">Detayları görmek için haritadan bir palet, raf veya araba seç.</p>}
         </aside>
@@ -677,7 +956,7 @@ export default function WarehouseApp() {
             onClick={(e) => e.stopPropagation()}
             style={{
               width: "min(680px, 100%)", maxHeight: "min(80vh, 760px)",
-              overflow: "auto", background: "#fff", color: "#17202c",
+              overflow: "auto", background: "#14161b", color: "#f2f3f5",
               borderRadius: 16, padding: 24, boxShadow: "0 24px 80px rgba(0,0,0,.25)"
             }}
           >
@@ -712,8 +991,8 @@ export default function WarehouseApp() {
                     style={{
                       width: "100%", textAlign: "left", display: "flex",
                       alignItems: "center", gap: 12, padding: 14,
-                      border: "1px solid #e5e7eb", borderRadius: 10,
-                      background: "#fff", cursor: "pointer"
+                      border: "1px solid #343944", borderRadius: 10,
+                      background: "#1b1e25", cursor: "pointer"
                     }}
                   >
                     <span className="product-symbol">P</span>
@@ -723,7 +1002,7 @@ export default function WarehouseApp() {
                     </span>
                     <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
                       <strong style={{ color: "#15803d", fontSize: 13 }}>Depoda</strong>
-                      <small style={{ color: "#64748b" }}>
+                      <small style={{ color: "#aeb3bd" }}>
                         {product.quantity === null ? "Miktar bilinmiyor" : `${product.quantity} ${product.unit}`}
                       </small>
                     </span>
@@ -731,14 +1010,14 @@ export default function WarehouseApp() {
                 ))}
               </div>
             )}
-            <p style={{ color: "#64748b", fontSize: 12, marginTop: 16 }}>
+            <p style={{ color: "#aeb3bd", fontSize: 12, marginTop: 16 }}>
               Bir ürüne tıklayarak haritada bulunduğu palet, raf veya arabayı seçebilirsin.
             </p>
           </section>
         </div>
       )}
 
-      <footer className="footer"><span>DEPOMAP · ERKEN GELİŞTİRME SÜRÜMÜ</span><span>{isCloudConfigured ? "Bulut kaydı ve anlık senkronizasyon" : "Yerel demo · bulut kaydı kapalı"}</span></footer>
+      <footer className="footer"><span>DESTOCK · DEPO YÖNETİMİ</span><span>{isCloudConfigured ? "Bulut kaydı ve anlık senkronizasyon" : "Yerel demo · bulut kaydı kapalı"}</span></footer>
     </main>
   );
 }
