@@ -1061,7 +1061,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       <main className="app-shell">
         <section className="panel" style={{ maxWidth: 480, margin: "8vh auto", padding: 32 }}>
           <div className="brand-mark" style={{ marginBottom: 16 }}>D</div>
-          <p className="eyebrow">DESTOCK / BULUT HESABI</p>
+          <p className="eyebrow">DesStock / Bulut Hesabı</p>
           <h1 style={{ marginBottom: 8 }}>{authMode === "signin" ? "Hesabına giriş yap" : "Yeni hesap oluştur"}</h1>
           <p className="subtitle">Depo bilgilerin hesabına kaydedilir ve yetkili ekip üyeleriyle senkronize edilir.</p>
           <form onSubmit={handleAuthSubmit} style={{ display: "grid", gap: 14, marginTop: 24 }}>
@@ -1089,7 +1089,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         style={{ maxWidth: 480, margin: "8vh auto", padding: 32 }}
       >
         <div className="brand-mark" style={{ marginBottom: 16 }}>D</div>
-        <p className="eyebrow">DESTOCK / DAVET</p>
+        <p className="eyebrow">DesStock / Davet</p>
         <h1>Şifreni belirle</h1>
         <p className="subtitle">
           Ekibine katılmak için hesabının şifresini oluştur.
@@ -1134,11 +1134,23 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     <main className="app-shell">
       <style jsx global>{`
         .app-shell { min-height: 100vh; background: #090a0d !important; color: #f2f3f5 !important; }
+        .app-shell { text-transform: capitalize; }
+        .app-shell input, .app-shell textarea, .app-shell select { text-transform: none !important; }
         .app-shell .panel, .app-shell .map-panel, .app-shell .search-panel { background: #14161b !important; color: #f2f3f5 !important; border: 1px solid #292d36 !important; box-shadow: 0 12px 36px rgba(0,0,0,.22); }
         .app-shell .topbar { background: #0d0f13 !important; border-bottom: 1px solid #292d36 !important; }
         .app-shell .topbar-actions { display: flex; align-items: center; gap: 10px; }
         .app-shell .mobile-menu-toggle { display: none; align-items: center; gap: 8px; }
         .app-shell .brand-mark { background: linear-gradient(145deg,#ff555d,#a90f1c) !important; color: white !important; box-shadow: 0 0 22px rgba(220,35,48,.22); }
+        .app-shell .brand-lockup { display: flex; align-items: center; gap: 18px; min-width: 0; }
+        .app-shell .brand-product, .app-shell .brand-maker { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .app-shell .brand-product-logo { display: block; width: 42px; height: 42px; object-fit: contain; flex: 0 0 42px; border-radius: 8px; }
+        .app-shell .brand-maker-logo { display: block; width: 38px; height: 38px; object-fit: contain; flex: 0 0 38px; }
+        .app-shell .brand-copy { display: grid; gap: 2px; min-width: 0; }
+        .app-shell .brand-copy strong { font-size: 15px; line-height: 1.15; letter-spacing: .1px; white-space: nowrap; }
+        .app-shell .brand-copy span { font-size: 11px; line-height: 1.25; color: #8f96a3; white-space: nowrap; }
+        .app-shell .brand-divider { width: 1px; height: 36px; background: #343944; flex: 0 0 1px; }
+        .app-shell .brand-maker-name { font-size: 14px; line-height: 1.15; color: #f7f7f8; white-space: nowrap; }
+        .app-shell .brand-maker-name .des { color: #f7f7f8; }\n        .app-shell .brand-maker-name .kaiz { color: #f0444e; }
         .app-shell .brand-copy strong, .app-shell h1, .app-shell h2, .app-shell h3 { color: #f7f7f8 !important; }
         .app-shell .subtitle, .app-shell .helper-text, .app-shell .panel-kicker, .app-shell .field-label { color: #aeb3bd !important; }
         .app-shell input, .app-shell select { background: #0d0f13 !important; color: #f5f5f6 !important; border: 1px solid #363b46 !important; }
@@ -1173,16 +1185,14 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
             gap: 10px;
             padding: 12px 14px;
           }
-          .app-shell .brand-mark {
-            width: 42px;
-            height: 42px;
-            min-width: 42px;
-            border-radius: 12px;
-            font-size: 23px;
-          }
-          .app-shell .brand-copy { min-width: 0; flex: 1 1 calc(100% - 64px); }
-          .app-shell .brand-copy strong { font-size: 19px; }
-          .app-shell .brand-copy span { font-size: 12px; }
+          .app-shell .brand-lockup { gap: 10px; flex: 1 1 auto; }
+          .app-shell .brand-product, .app-shell .brand-maker { gap: 7px; }
+          .app-shell .brand-product-logo { width: 36px; height: 36px; flex-basis: 36px; }
+          .app-shell .brand-maker-logo { width: 30px; height: 30px; flex-basis: 30px; }
+          .app-shell .brand-divider { height: 30px; }
+          .app-shell .brand-copy strong { font-size: 13px; }
+          .app-shell .brand-copy span { font-size: 9px; }
+          .app-shell .brand-maker-name { font-size: 11px; }
           .app-shell .topbar-spacer { display: none; }
           .app-shell .mobile-menu-toggle { display: inline-flex; flex: 0 0 auto; min-height: 42px; }
           .app-shell .topbar { position: relative !important; height: auto !important; min-height: 0 !important; overflow: visible !important; }
@@ -1367,8 +1377,22 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         }
       `}</style>
       <header className="topbar">
-        <div className="brand-mark">D</div>
-        <div className="brand-copy"><strong>deStock</strong><span>Depo konum yönetimi</span></div>
+        <div className="brand-lockup">
+          <div className="brand-product">
+            <img className="brand-product-logo" src="/icon-512.png" alt="deStock logosu" />
+            <div className="brand-copy">
+              <strong>DesStock</strong>
+              <span>Depo Konum Yönetimi</span>
+            </div>
+          </div>
+          <span className="brand-divider" aria-hidden="true" />
+          <div className="brand-maker">
+            <img className="brand-maker-logo" src="/deskaiz-logo.png" alt="DesKaiz logosu" />
+            <div className="brand-copy">
+              <strong className="brand-maker-name">Made By <span className="des">Des</span><span className="kaiz">Kaiz</span></strong>
+            </div>
+          </div>
+        </div>
         <div className="topbar-spacer" />
         <button
           type="button"
@@ -1397,8 +1421,8 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
 
       <section className="welcome-row">
         <div>
-          <p className="eyebrow">DEPO YÖNETİMİ / HARİTA EDİTÖRÜ</p>
-          <h1>Depodaki her şeyin yerini bil.</h1>
+          <p className="eyebrow">Depo Yönetimi / Harita Editörü</p>
+          <h1>Depodaki her şeyin yerini bil...</h1>
           <p className="subtitle">Ölçülü harita üzerinde palet, raf ve arabaları yerleştir. Ürün konumlarını tek ekrandan yönet.</p>
         </div>
         <div className="demo-notice"><span className="notice-dot" /> {notice}</div>
