@@ -123,7 +123,9 @@ export default function WarehouseApp() {
   const [organizationCloseBusy, setOrganizationCloseBusy] = useState(false);
   const [organizationCloseError, setOrganizationCloseError] = useState("");
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const panGesture = useRef<{ kind: "mouse" | "touch" | null; lastX: number; lastY: number }>({ kind: null, lastX: 0, lastY: 0 });
+  const [mapZoom, setMapZoom] = useState(1);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const panGesture = useRef<{ kind: "mouse" | "touch" | null; lastX: number; lastY: number; lastDistance: number }>({ kind: null, lastX: 0, lastY: 0, lastDistance: 0 });
   const [isSettingPassword, setIsSettingPassword] = useState(false);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [membershipRole, setMembershipRole] = useState<string | null>(null);
@@ -977,7 +979,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
   function startMapMousePan(e: React.MouseEvent<HTMLDivElement>) {
     if (e.button !== 1) return;
     e.preventDefault();
-    panGesture.current = { kind: "mouse", lastX: e.clientX, lastY: e.clientY };
+    panGesture.current = { kind: "mouse", lastX: e.clientX, lastY: e.clientY, lastDistance: 0 };
   }
 
   function moveMapMousePan(e: React.MouseEvent<HTMLDivElement>) {
@@ -993,19 +995,58 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     return { x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 };
   }
 
+  function touchDistance(touches: React.TouchList) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  }
+
   function startMapTouchPan(e: React.TouchEvent<HTMLDivElement>) {
-    if (e.touches.length !== 2) return;
-    const center = touchCenter(e.touches);
-    panGesture.current = { kind: "touch", lastX: center.x, lastY: center.y };
+    if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      panGesture.current = { kind: "touch", lastX: touch.clientX, lastY: touch.clientY, lastDistance: 0 };
+      return;
+    }
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const center = touchCenter(e.touches);
+      panGesture.current = { kind: "touch", lastX: center.x, lastY: center.y, lastDistance: touchDistance(e.touches) };
+    }
   }
 
   function moveMapTouchPan(e: React.TouchEvent<HTMLDivElement>) {
-    if (e.touches.length !== 2 || panGesture.current.kind !== "touch") return;
-    e.preventDefault();
-    const center = touchCenter(e.touches);
-    setPan((current) => ({ x: current.x + center.x - panGesture.current.lastX, y: current.y + center.y - panGesture.current.lastY }));
-    panGesture.current.lastX = center.x;
-    panGesture.current.lastY = center.y;
+    if (panGesture.current.kind !== "touch") return;
+    if (e.touches.length === 1) {
+      e.preventDefault();
+      const touch = e.touches[0];
+      setPan((current) => ({ x: current.x + touch.clientX - panGesture.current.lastX, y: current.y + touch.clientY - panGesture.current.lastY }));
+      panGesture.current.lastX = touch.clientX;
+      panGesture.current.lastY = touch.clientY;
+      panGesture.current.lastDistance = 0;
+      return;
+    }
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const center = touchCenter(e.touches);
+      const distance = touchDistance(e.touches);
+      const previousDistance = panGesture.current.lastDistance || distance;
+      const zoomRatio = distance / Math.max(1, previousDistance);
+      setPan((current) => ({ x: current.x + center.x - panGesture.current.lastX, y: current.y + center.y - panGesture.current.lastY }));
+      if (Math.abs(zoomRatio - 1) > 0.005) {
+        setMapZoom((current) => Math.max(0.6, Math.min(2.2, Number((current * zoomRatio).toFixed(3)))));
+      }
+      panGesture.current.lastX = center.x;
+      panGesture.current.lastY = center.y;
+      panGesture.current.lastDistance = distance;
+    }
+  }
+
+  function moveMapBy(dx: number, dy: number) {
+    setPan((current) => ({ x: current.x + dx, y: current.y + dy }));
+  }
+
+  function changeMapZoom(delta: number) {
+    setMapZoom((current) => Math.max(0.6, Math.min(2.2, Number((current + delta).toFixed(2)))));
   }
 
   const canvasWidth = Math.max(300, widthM * SCALE);
@@ -1095,6 +1136,8 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         .app-shell { min-height: 100vh; background: #090a0d !important; color: #f2f3f5 !important; }
         .app-shell .panel, .app-shell .map-panel, .app-shell .search-panel { background: #14161b !important; color: #f2f3f5 !important; border: 1px solid #292d36 !important; box-shadow: 0 12px 36px rgba(0,0,0,.22); }
         .app-shell .topbar { background: #0d0f13 !important; border-bottom: 1px solid #292d36 !important; }
+        .app-shell .topbar-actions { display: flex; align-items: center; gap: 10px; }
+        .app-shell .mobile-menu-toggle { display: none; align-items: center; gap: 8px; }
         .app-shell .brand-mark { background: linear-gradient(145deg,#ff555d,#a90f1c) !important; color: white !important; box-shadow: 0 0 22px rgba(220,35,48,.22); }
         .app-shell .brand-copy strong, .app-shell h1, .app-shell h2, .app-shell h3 { color: #f7f7f8 !important; }
         .app-shell .subtitle, .app-shell .helper-text, .app-shell .panel-kicker, .app-shell .field-label { color: #aeb3bd !important; }
@@ -1108,7 +1151,220 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         .app-shell .invite-code-card strong { color: #ff5a64; font: 700 20px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; overflow-wrap: anywhere; }
         .app-shell .footer { color: #858b98 !important; border-top: 1px solid #292d36 !important; }
         .app-shell .map-legend, .app-shell .map-footer { color: #b9bec8 !important; }
-        @media (max-width: 760px) { .app-shell .map-viewport { max-height: 58vh; } .app-shell .topbar { flex-wrap: wrap; gap: 8px; } .app-shell .map-header { gap: 10px; flex-wrap: wrap; } }
+        .app-shell .map-controls { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 2px; }
+        .app-shell .map-pan-pad { display: grid; justify-items: center; gap: 4px; }
+        .app-shell .map-pan-pad > div { display: flex; gap: 4px; }
+        .app-shell .map-pan-pad button, .app-shell .map-zoom-controls button { min-width: 38px; min-height: 36px; border: 1px solid #383d48; border-radius: 8px; background: #1b1e25; color: #f2f3f5; font-size: 18px; cursor: pointer; }
+        .app-shell .map-zoom-controls { display: flex; align-items: center; gap: 7px; }
+        .app-shell .map-zoom-controls span { min-width: 48px; text-align: center; color: #c4c8d0; font-size: 12px; font-variant-numeric: tabular-nums; }
+        .app-shell .map-zoom-controls button:last-child { padding: 0 10px; font-size: 12px; }
+        /* Mobil düzen: mevcut masaüstü yapısı korunur, yalnızca küçük ekranlarda yeniden akar. */
+        @media (max-width: 760px) {
+          .app-shell {
+            width: 100%;
+            min-width: 0;
+            overflow-x: hidden;
+            padding-bottom: max(18px, env(safe-area-inset-bottom));
+          }
+          .app-shell .topbar {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 12px 14px;
+          }
+          .app-shell .brand-mark {
+            width: 42px;
+            height: 42px;
+            min-width: 42px;
+            border-radius: 12px;
+            font-size: 23px;
+          }
+          .app-shell .brand-copy { min-width: 0; flex: 1 1 calc(100% - 64px); }
+          .app-shell .brand-copy strong { font-size: 19px; }
+          .app-shell .brand-copy span { font-size: 12px; }
+          .app-shell .topbar-spacer { display: none; }
+          .app-shell .mobile-menu-toggle { display: inline-flex; flex: 0 0 auto; min-height: 42px; }
+          .app-shell .topbar { position: relative !important; height: auto !important; min-height: 0 !important; overflow: visible !important; }
+          .app-shell .topbar-actions {
+            position: static !important;
+            inset: auto !important;
+            transform: none !important;
+            float: none !important;
+            display: none;
+            width: 100%;
+            flex: 1 0 100%;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 8px;
+            padding-top: 8px;
+          }
+          .app-shell .topbar-actions.is-open { display: flex; position: static !important; }
+          .app-shell .topbar-actions > * { position: static !important; float: none !important; transform: none !important; }
+          .app-shell .topbar-actions > button,
+          .app-shell .topbar-actions > .status-pill {
+            width: 100%;
+            min-height: 42px;
+            justify-content: center;
+            margin: 0 !important;
+            box-sizing: border-box;
+            text-align: center;
+          }
+          .app-shell .welcome-row {
+            position: relative !important;
+            clear: both !important;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 12px;
+            padding: 22px 14px 16px;
+          }
+          .app-shell .welcome-row h1 {
+            font-size: clamp(25px, 7vw, 34px);
+            line-height: 1.12;
+            letter-spacing: -0.7px;
+            overflow-wrap: anywhere;
+          }
+          .app-shell .welcome-row .subtitle {
+            font-size: 14px;
+            line-height: 1.55;
+            margin-top: 9px;
+          }
+          .app-shell .welcome-row .eyebrow { font-size: 10px; letter-spacing: 1.5px; }
+          .app-shell .demo-notice {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 11px 13px;
+            border-radius: 12px;
+            font-size: 12px;
+            line-height: 1.45;
+          }
+          .app-shell .workspace {
+            display: flex !important;
+            flex-direction: column;
+            gap: 14px;
+            width: 100%;
+            min-width: 0;
+            padding: 0 12px;
+            box-sizing: border-box;
+          }
+          .app-shell .map-panel { order: 0; width: 100%; min-width: 0; }
+          .app-shell .detail-panel { order: 1; width: 100%; min-width: 0; }
+          .app-shell .settings-panel { order: 2; width: 100%; min-width: 0; }
+          .app-shell .panel,
+          .app-shell .map-panel,
+          .app-shell .search-panel {
+            box-sizing: border-box;
+            border-radius: 15px;
+            padding: 14px;
+          }
+          .app-shell .panel-heading { gap: 10px; align-items: flex-start; }
+          .app-shell .panel-heading h2,
+          .app-shell .map-header h2 { font-size: 18px; line-height: 1.25; }
+          .app-shell .panel-kicker { font-size: 10px; letter-spacing: 1.35px; }
+          .app-shell .map-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            padding-bottom: 12px;
+          }
+          .app-shell .map-header > div:first-child { min-width: 0; }
+          .app-shell .map-header p { font-size: 12px; }
+          .app-shell .map-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            font-size: 11px;
+          }
+          .app-shell .map-viewport {
+            position: relative !important;
+            width: 100%;
+            min-width: 0;
+            height: min(54svh, 470px);
+            min-height: 290px;
+            max-height: 470px !important;
+            overflow: hidden !important;
+            border-radius: 10px;
+            touch-action: none;
+          }
+          .app-shell .map-scroll { transform-origin: top left; }
+          .app-shell .map-controls { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 0 2px; }
+          .app-shell .map-pan-pad, .app-shell .map-zoom-controls { background: rgba(15,17,22,.92); border: 1px solid #424753; border-radius: 12px; padding: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+          .app-shell .map-pan-pad button, .app-shell .map-zoom-controls button { min-width: 40px; min-height: 40px; touch-action: manipulation; }
+          .app-shell .map-zoom-controls { gap: 4px; }
+          .app-shell .map-zoom-controls span { min-width: 38px; font-size: 11px; }
+          .app-shell .map-footer {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px 12px;
+            padding-top: 10px;
+            font-size: 10px;
+          }
+          .app-shell .map-footer kbd { font-size: 10px; }
+          .app-shell .field-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+          }
+          .app-shell .field-label { min-width: 0; font-size: 12px; }
+          .app-shell input:not([type="checkbox"]),
+          .app-shell select {
+            width: 100%;
+            min-width: 0;
+            min-height: 43px;
+            box-sizing: border-box;
+            font-size: 14px;
+            padding: 10px 11px;
+            border-radius: 9px;
+          }
+          .app-shell button { min-height: 40px; }
+          .app-shell .add-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+          .app-shell .add-button { min-width: 0; padding: 10px 8px; gap: 6px; }
+          .app-shell .add-button b { margin-left: auto; }
+          .app-shell .selected-object { gap: 10px; padding: 11px; }
+          .app-shell .selected-object > div { min-width: 0; }
+          .app-shell .selected-object strong { overflow-wrap: anywhere; }
+          .app-shell .product-list { display: grid; gap: 8px; }
+          .app-shell .product-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            padding: 10px;
+          }
+          .app-shell .product-copy { min-width: 0; flex: 1; }
+          .app-shell .product-copy strong,
+          .app-shell .product-copy span { overflow-wrap: anywhere; }
+          .app-shell .add-product-form { display: grid; gap: 11px; }
+          .app-shell .full-button { width: 100%; min-height: 44px; }
+          .app-shell .search-panel {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 12px;
+            margin: 14px 12px 0;
+            width: calc(100% - 24px);
+          }
+          .app-shell .search-content,
+          .app-shell .search-input-wrap { min-width: 0; width: 100%; }
+          .app-shell .search-result { min-width: 0; gap: 8px; padding: 11px; }
+          .app-shell .result-action { display: none; }
+          .app-shell .footer {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            padding: 16px 14px;
+            font-size: 10px;
+          }
+        }
+        @media (max-width: 380px) {
+          .app-shell .workspace { padding-left: 8px; padding-right: 8px; }
+          .app-shell .welcome-row { padding-left: 12px; padding-right: 12px; }
+          .app-shell .panel, .app-shell .map-panel { padding: 11px; }
+          .app-shell .add-grid { grid-template-columns: 1fr; }
+          .app-shell .map-viewport { min-height: 250px; height: 48svh; }
+          .app-shell .topbar > button { flex-basis: calc(50% - 8px); }
+        }
       `}</style>
       <header className="topbar">
         <div className="brand-mark">D</div>
@@ -1116,21 +1372,27 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         <div className="topbar-spacer" />
         <button
           type="button"
-          className="secondary-button"
-          onClick={() => setShowAllProducts(true)}
-          style={{ marginRight: 12, whiteSpace: "nowrap" }}
+          className="mobile-menu-toggle secondary-button"
+          aria-label={mobileMenuOpen ? "Menüyü kapat" : "Menüyü aç"}
+          aria-expanded={mobileMenuOpen}
+          onClick={() => setMobileMenuOpen((open) => !open)}
         >
-          Ürün listesi ({allProducts.length})
+          <span aria-hidden="true">{mobileMenuOpen ? "×" : "☰"}</span>
+          <span>{mobileMenuOpen ? "Kapat" : "Menü"}</span>
         </button>
-        {canManageWarehouse && supabase && <button
-          type="button"
-          className="secondary-button"
-          onClick={() => { setShowActivity(true); void loadActivityLogs(); }}
-          style={{ marginRight: 12, whiteSpace: "nowrap" }}
-        >
-          İşlemler
-        </button>}
-        {isCloudConfigured ? <><span className={`status-pill ${dataError ? "status-warn" : ""}`}>{dataError ? "Bulut hatası" : "Bulut bağlantısı"}</span><button type="button" className="secondary-button" onClick={signOut}>Çıkış yap</button><button type="button" className="secondary-button" onClick={() => { setAccountDeleteError(""); setAccountDeleteStep(1); }} style={{ color: "#ff6b73", borderColor: "#71313a" }}>Hesabımı sil</button></> : <span className="status-pill status-warn">Yerel demo · bulut ayarı yok</span>}
+        <div className={`topbar-actions ${mobileMenuOpen ? "is-open" : ""}`}>
+          <button type="button" className="secondary-button" onClick={() => { setShowAllProducts(true); setMobileMenuOpen(false); }}>
+            Ürün listesi ({allProducts.length})
+          </button>
+          {canManageWarehouse && supabase && <button type="button" className="secondary-button" onClick={() => { setShowActivity(true); setMobileMenuOpen(false); void loadActivityLogs(); }}>
+            İşlemler
+          </button>}
+          {isCloudConfigured ? <>
+            <span className={`status-pill ${dataError ? "status-warn" : ""}`}>{dataError ? "Bulut hatası" : "Bulut bağlantısı"}</span>
+            <button type="button" className="secondary-button" onClick={() => { void signOut(); setMobileMenuOpen(false); }}>Çıkış yap</button>
+            <button type="button" className="secondary-button" onClick={() => { setAccountDeleteError(""); setAccountDeleteStep(1); setMobileMenuOpen(false); }} style={{ color: "#ff6b73", borderColor: "#71313a" }}>Hesabımı sil</button>
+          </> : <span className="status-pill status-warn">Yerel demo · bulut ayarı yok</span>}
+        </div>
       </header>
 
       <section className="welcome-row">
@@ -1257,8 +1519,8 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
             <div><span className="panel-kicker">CANLI ÖNİZLEME</span><h2>{warehouseName || "Yeni depo"}</h2><p>{widthM} m × {lengthM} m · {gridM} m ızgara</p></div>
             <div className="map-legend"><span><i className="legend-dot pallet-dot" />Palet</span><span><i className="legend-dot rack-dot" />Raf</span><span><i className="legend-dot cart-dot" />Araba</span></div>
           </div>
-          <div className="map-viewport" onMouseDown={startMapMousePan} onMouseMove={moveMapMousePan} onMouseUp={endMapPan} onMouseLeave={endMapPan} onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }} onTouchStart={startMapTouchPan} onTouchMove={moveMapTouchPan} onTouchEnd={endMapPan} style={{ touchAction: "pan-y", cursor: panGesture.current.kind === "mouse" ? "grabbing" : "grab" }}>
-            <div className="map-scroll" style={{ width: canvasWidth + 2, height: canvasHeight + 2, transform: `translate(${pan.x}px, ${pan.y}px)` }}>
+          <div className="map-viewport" onMouseDown={startMapMousePan} onMouseMove={moveMapMousePan} onMouseUp={endMapPan} onMouseLeave={endMapPan} onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }} onTouchStart={startMapTouchPan} onTouchMove={moveMapTouchPan} onTouchEnd={endMapPan} style={{ touchAction: "none", cursor: panGesture.current.kind === "mouse" ? "grabbing" : "grab" }}>
+            <div className="map-scroll" style={{ width: canvasWidth + 2, height: canvasHeight + 2, transform: `translate(${pan.x}px, ${pan.y}px) scale(${mapZoom})`, transformOrigin: "top left" }}>
               <Stage width={canvasWidth} height={canvasHeight} scaleX={1} scaleY={1}>
                 <Layer>
                   <Rect x={0} y={0} width={canvasWidth} height={canvasHeight} fill="#111318" stroke="#3b3f49" strokeWidth={1} />
@@ -1294,7 +1556,23 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
               </Stage>
             </div>
           </div>
-          <div className="map-footer"><span><kbd>Orta tuş</kbd> Kaydır</span><span><kbd>2 parmak</kbd> Kaydır</span><span><kbd>Tek parmak</kbd> Sayfayı kaydır</span><span>1 m = {SCALE}px</span></div>
+          <div className="map-controls" aria-label="Harita kontrolleri" onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()}>
+            <div className="map-pan-pad" aria-label="Haritayı hareket ettir">
+              <button type="button" aria-label="Haritayı yukarı kaydır" onClick={() => moveMapBy(0, 70)}>↑</button>
+              <div>
+                <button type="button" aria-label="Haritayı sola kaydır" onClick={() => moveMapBy(70, 0)}>←</button>
+                <button type="button" aria-label="Haritayı aşağı kaydır" onClick={() => moveMapBy(0, -70)}>↓</button>
+                <button type="button" aria-label="Haritayı sağa kaydır" onClick={() => moveMapBy(-70, 0)}>→</button>
+              </div>
+            </div>
+            <div className="map-zoom-controls">
+              <button type="button" aria-label="Yakınlaştır" onClick={() => changeMapZoom(0.15)}>＋</button>
+              <span>{Math.round(mapZoom * 100)}%</span>
+              <button type="button" aria-label="Uzaklaştır" onClick={() => changeMapZoom(-0.15)}>−</button>
+              <button type="button" aria-label="Haritayı sıfırla" onClick={() => { setMapZoom(1); setPan({ x: 0, y: 0 }); }}>Sıfırla</button>
+            </div>
+          </div>
+          <div className="map-footer"><span><kbd>Orta tuş</kbd> Kaydır</span><span><kbd>Tek parmak</kbd> Kaydır</span><span><kbd>İki parmak</kbd> Kaydır / yakınlaştır</span><span>1 m = {SCALE}px</span></div>
         </section>
 
         <aside className="panel detail-panel">
