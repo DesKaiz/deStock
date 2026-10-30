@@ -13,7 +13,7 @@ export default {
   fetch: handler.fetch,
 
   async scheduled(
-    _controller: ScheduledController,
+    _controller: unknown,
     env: Env,
   ) {
     const response = await env.WORKER_SELF_REFERENCE.fetch(
