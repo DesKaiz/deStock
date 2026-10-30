@@ -67,6 +67,15 @@ export default function WarehouseApp() {
   const [createdInviteCode, setCreatedInviteCode] = useState("");
   const [inviteCodeBusy, setInviteCodeBusy] = useState(false);
   const [inviteCodeMessage, setInviteCodeMessage] = useState("");
+  const [teamMembers, setTeamMembers] = useState<Array<{ user_id: string; email: string | null; role: string; joined_at: string | null }>>([]);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamMessage, setTeamMessage] = useState("");
+  const [accountDeleteStep, setAccountDeleteStep] = useState<0 | 1 | 2>(0);
+  const [accountDeleteBusy, setAccountDeleteBusy] = useState(false);
+  const [accountDeleteError, setAccountDeleteError] = useState("");
+  const [organizationCloseStep, setOrganizationCloseStep] = useState<0 | 1 | 2>(0);
+  const [organizationCloseBusy, setOrganizationCloseBusy] = useState(false);
+  const [organizationCloseError, setOrganizationCloseError] = useState("");
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panGesture = useRef<{ kind: "mouse" | "touch" | null; lastX: number; lastY: number }>({ kind: null, lastX: 0, lastY: 0 });
   const [isSettingPassword, setIsSettingPassword] = useState(false);
@@ -302,6 +311,9 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         if (!alive) return;
         setOrganizationId(orgId!);
         setWarehouseId(whId!);
+        if (["owner", "manager"].includes(membership?.role ?? "owner")) {
+          await loadTeamMembers(orgId!);
+        }
         await loadWarehouseData(orgId!, whId!);
 
         channel = supabase!.channel(`depomap-${orgId}-${whId}`)
@@ -417,6 +429,40 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
   }
 }
 
+  async function loadTeamMembers(orgId: string) {
+    if (!supabase) return;
+    setTeamLoading(true);
+    setTeamMessage("");
+    try {
+      const { data, error } = await supabase.rpc("depomap_list_members", {
+        p_organization_id: orgId,
+      });
+      if (error) throw error;
+      setTeamMembers((data ?? []) as Array<{ user_id: string; email: string | null; role: string; joined_at: string | null }>);
+    } catch (error) {
+      setTeamMessage(error instanceof Error ? error.message : "Ekip listesi yüklenemedi.");
+    } finally {
+      setTeamLoading(false);
+    }
+  }
+
+  async function handleRemoveMember(member: { user_id: string; email: string | null; role: string }) {
+    if (!supabase || !organizationId) return;
+    const displayName = member.email || "Bu üye";
+    if (!window.confirm(`${displayName} işletmeden çıkarılsın mı? Kişinin hesabı silinmez; yalnızca bu işletmeye erişimi kaldırılır.`)) return;
+    setTeamMessage("");
+    const { error } = await supabase.rpc("depomap_remove_member", {
+      p_organization_id: organizationId,
+      p_target_user_id: member.user_id,
+    });
+    if (error) {
+      setTeamMessage(`Üye çıkarılamadı: ${error.message}`);
+      return;
+    }
+    setTeamMembers((current) => current.filter((item) => item.user_id !== member.user_id));
+    setTeamMessage(`${displayName} işletmeden çıkarıldı. Hesabı korunuyor.`);
+  }
+
   async function handleCreateInviteCode() {
     if (!supabase || !organizationId || !["owner", "manager"].includes(membershipRole ?? "")) {
       setInviteCodeMessage("Davet kodu oluşturma yetkin yok.");
@@ -458,6 +504,78 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
   if (error) {
     setNotice(`Çıkış yapılamadı: ${error.message}`);
   }
+  }
+
+  async function deleteOwnAccount() {
+    if (!supabase || !user || accountDeleteBusy) return;
+    setAccountDeleteBusy(true);
+    setAccountDeleteError("");
+    try {
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) throw new Error("Oturum doğrulanamadı. Yeniden giriş yap.");
+
+      const response = await fetch("/api/account/delete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ confirmation: "DELETE_MY_ACCOUNT" }),
+      });
+      const result = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(result.error || "Hesap silinemedi.");
+
+      await supabase.auth.signOut();
+      setAccountDeleteStep(0);
+      window.location.assign("/");
+    } catch (error) {
+      setAccountDeleteError(error instanceof Error ? error.message : "Hesap silinemedi.");
+    } finally {
+      setAccountDeleteBusy(false);
+    }
+  }
+    async function closeOrganization() {
+    if (!supabase || !organizationId || membershipRole !== "owner" || organizationCloseBusy) return;
+
+    setOrganizationCloseBusy(true);
+    setOrganizationCloseError("");
+
+    try {
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) throw new Error("Oturum doğrulanamadı. Yeniden giriş yap.");
+
+      const response = await fetch("/api/organization/close", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          organizationId,
+          confirmation: "CLOSE_ORGANIZATION",
+        }),
+      });
+
+      const result = (await response.json().catch(() => ({}))) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(result.error || "İşletme kapatılamadı.");
+      }
+
+      await supabase.auth.signOut();
+      window.location.assign("/");
+    } catch (error) {
+      setOrganizationCloseError(
+        error instanceof Error ? error.message : "İşletme kapatılamadı."
+      );
+    } finally {
+      setOrganizationCloseBusy(false);
+    }
   }
   const selected = objects.find((o) => o.id === selectedId) ?? null;
   const allProducts = useMemo(() => objects.flatMap((o) => o.products.map((p) => ({ ...p, objectId: o.id, objectLabel: o.label, objectType: o.type }))), [objects]);
@@ -833,7 +951,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         >
           Ürün listesi ({allProducts.length})
         </button>
-        {isCloudConfigured ? <><span className={`status-pill ${dataError ? "status-warn" : ""}`}>{dataError ? "Bulut hatası" : "Bulut bağlantısı"}</span><button type="button" className="secondary-button" onClick={signOut}>Çıkış yap</button></> : <span className="status-pill status-warn">Yerel demo · bulut ayarı yok</span>}
+        {isCloudConfigured ? <><span className={`status-pill ${dataError ? "status-warn" : ""}`}>{dataError ? "Bulut hatası" : "Bulut bağlantısı"}</span><button type="button" className="secondary-button" onClick={signOut}>Çıkış yap</button><button type="button" className="secondary-button" onClick={() => { setAccountDeleteError(""); setAccountDeleteStep(1); }} style={{ color: "#ff6b73", borderColor: "#71313a" }}>Hesabımı sil</button></> : <span className="status-pill status-warn">Yerel demo · bulut ayarı yok</span>}
       </header>
 
       <section className="welcome-row">
@@ -885,6 +1003,61 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
                 </div>
               )}
               {inviteCodeMessage && <p className="helper-text" role="status">{inviteCodeMessage}</p>}
+              <div className="section-rule" />
+              <div className="panel-heading compact">
+                <div><span className="panel-kicker">EKİP ÜYELERİ</span><h2>İşletme ekibi ({teamMembers.length})</h2></div>
+                <button type="button" className="secondary-button" onClick={() => organizationId && void loadTeamMembers(organizationId)} disabled={teamLoading}>
+                  {teamLoading ? "Yükleniyor..." : "Yenile"}
+                </button>
+              </div>
+              {teamLoading && teamMembers.length === 0 ? (
+                <p className="helper-text">Ekip yükleniyor...</p>
+              ) : teamMembers.length === 0 ? (
+                <p className="helper-text">Henüz ekip üyesi bulunamadı.</p>
+              ) : (
+                <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                  {teamMembers.map((member) => (
+                    <div key={member.user_id} className="product-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div className="product-copy" style={{ minWidth: 0, flex: 1 }}>
+                        <strong style={{ overflowWrap: "anywhere" }}>{member.email || "E-posta bilgisi yok"}</strong>
+                        <span>{({ owner: "İşletme sahibi", manager: "Yönetici", worker: "Çalışan", viewer: "Görüntüleyici" } as Record<string, string>)[member.role] || member.role}</span>
+                      </div>
+                      {member.role !== "owner" && (membershipRole === "owner" || (membershipRole === "manager" && ["worker", "viewer"].includes(member.role))) && (
+                        <button type="button" className="secondary-button" onClick={() => void handleRemoveMember(member)} style={{ color: "#ff6871", borderColor: "#71313a", flexShrink: 0 }}>
+                          Üyeyi çıkar
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {teamMessage && <p className="helper-text" role="status">{teamMessage}</p>}
+            </>
+          )}
+          {isCloudConfigured && organizationId && membershipRole === "owner" && (
+            <>
+              <div className="section-rule" />
+              <div className="panel-heading compact">
+                <div>
+                  <span className="panel-kicker">İŞLETME YÖNETİMİ</span>
+                  <h2>İşletmeyi kapat</h2>
+                </div>
+              </div>
+              <p className="helper-text">
+                İşletmeyi kapatmak; depo, harita, ürün, stok ve ekip verilerini
+                ve işletmeye bağlı tüm kullanıcı hesaplarını kalıcı olarak siler.
+              </p>
+              <button
+                type="button"
+                className="secondary-button full-button"
+                onClick={() => {
+                  setOrganizationCloseError("");
+                  setOrganizationCloseStep(1);
+                }}
+                style={{ color: "#ff6b73", borderColor: "#71313a" }}
+              >
+                İşletmeyi kapat
+              </button>
             </>
           )}
           {canEditOperations && <>
@@ -1089,6 +1262,147 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
             <p style={{ color: "#aeb3bd", fontSize: 12, marginTop: 16 }}>
               Bir ürüne tıklayarak haritada bulunduğu palet, raf veya arabayı seçebilirsin.
             </p>
+          </section>
+        </div>
+      )}
+
+      {accountDeleteStep > 0 && (
+        <div
+          role="presentation"
+          onClick={() => { if (!accountDeleteBusy) setAccountDeleteStep(0); }}
+          style={{ position: "fixed", inset: 0, zIndex: 1200, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-account-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(480px, 100%)", background: "#14161b", color: "#f2f3f5", border: "1px solid #71313a", borderRadius: 14, padding: 24, boxShadow: "0 24px 80px rgba(0,0,0,.45)" }}
+          >
+            <span className="panel-kicker" style={{ color: "#ff6b73" }}>HESAP GÜVENLİĞİ</span>
+            <h2 id="delete-account-title" style={{ margin: "8px 0 12px" }}>Hesabımı sil</h2>
+            {accountDeleteStep === 1 ? (
+              <>
+                <p>Hesabınızı silmeyi onaylıyor musunuz?</p>
+                <p className="helper-text">Hesabınızın işletme sahibi olması durumunda önce işletme sahipliğinin devredilmesi gerekir.</p>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
+                  <button type="button" className="secondary-button" onClick={() => setAccountDeleteStep(0)}>Vazgeç</button>
+                  <button type="button" className="primary-button" onClick={() => setAccountDeleteStep(2)}>Devam et</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p style={{ color: "#ff8a91", fontWeight: 700 }}>Bu işlem geri alınamaz.</p>
+                <p>Hesabınızı silmeyi onaylıyor musunuz?</p>
+                <p className="helper-text">Hesabınız kalıcı olarak silinir. İşletme üyelikleriniz kaldırılır. Geçmiş stok ve işlem kayıtları korunur; hesabınızın sahibi olduğu işletmeler silinmez.</p>
+                {accountDeleteError && <p role="alert" style={{ color: "#ff8a91", marginTop: 12 }}>{accountDeleteError}</p>}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
+                  <button type="button" className="secondary-button" disabled={accountDeleteBusy} onClick={() => setAccountDeleteStep(0)}>İptal</button>
+                  <button type="button" className="primary-button" disabled={accountDeleteBusy} onClick={deleteOwnAccount} style={{ background: "#b42318", borderColor: "#b42318" }}>{accountDeleteBusy ? "Hesap siliniyor..." : "Hesabımı kalıcı olarak sil"}</button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+
+      {organizationCloseStep > 0 && (
+        <div
+          role="presentation"
+          onClick={() => {
+            if (!organizationCloseBusy) setOrganizationCloseStep(0);
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1201,
+            background: "rgba(0,0,0,.78)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="close-organization-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(480px, 100%)",
+              background: "#14161b",
+              color: "#f2f3f5",
+              border: "1px solid #71313a",
+              borderRadius: 14,
+              padding: 24,
+              boxShadow: "0 24px 80px rgba(0,0,0,.45)",
+            }}
+          >
+            <span className="panel-kicker" style={{ color: "#ff6b73" }}>
+              GERİ DÖNÜŞÜ OLMAYAN İŞLEM
+            </span>
+            <h2 id="close-organization-title" style={{ margin: "8px 0 12px" }}>
+              İşletmeyi kapat
+            </h2>
+
+            {organizationCloseStep === 1 ? (
+              <>
+                <p>İşletmenizi kapatmayı onaylıyor musunuz?</p>
+                <p className="helper-text">
+                  İşletmeye bağlı depo, harita, ürün, stok ve ekip bilgileri
+                  kalıcı olarak silinecektir.
+                </p>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setOrganizationCloseStep(0)}
+                  >
+                    Vazgeç
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => setOrganizationCloseStep(2)}
+                  >
+                    Devam et
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p style={{ color: "#ff8a91", fontWeight: 700 }}>
+                  Bu işlem geri alınamaz.
+                </p>
+                <p>
+                  İşletmeye bağlı tüm kullanıcı hesapları da kalıcı olarak silinecektir.
+                </p>
+                {organizationCloseError && (
+                  <p role="alert" style={{ color: "#ff8a91", marginTop: 12 }}>
+                    {organizationCloseError}
+                  </p>
+                )}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={organizationCloseBusy}
+                    onClick={() => setOrganizationCloseStep(0)}
+                  >
+                    İptal
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={organizationCloseBusy}
+                    onClick={closeOrganization}
+                    style={{ background: "#b42318", borderColor: "#b42318" }}
+                  >
+                    {organizationCloseBusy ? "İşletme kapatılıyor..." : "İşletmeyi kalıcı olarak kapat"}
+                  </button>
+                </div>
+              </>
+            )}
           </section>
         </div>
       )}
