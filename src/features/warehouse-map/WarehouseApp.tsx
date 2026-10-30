@@ -15,7 +15,25 @@ const initialObjects: MapObject[] = [
 ];
 
 function makeId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now() + Math.random());
+  // Supabase UUID alanları için her koşulda geçerli UUID üret.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+  }
+
+  // Eski tarayıcılar için RFC 4122 v4 biçiminde yedek üretim.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    return (char === "x" ? random : (random & 0x3) | 0x8).toString(16);
+  });
 }
 
 const isCloudConfigured = Boolean(
@@ -174,6 +192,8 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       for (const content of contentsResult.data ?? []) {
         const product: any = productById.get(content.product_id);
         if (!product) continue;
+        // Stok miktarı sıfır olan ürünler kayıtta kalır ancak aktif listelerde gösterilmez.
+        if (content.quantity !== null && Number(content.quantity) <= 0) continue;
         const current = contentsByUnit.get(content.storage_unit_id) ?? [];
         current.push({
           id: product.id,
@@ -574,6 +594,10 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       const { data: savedProduct } = await supabase.from("products").select("id,name,unit_name").eq("id", productId).single();
       setObjects((prev) => prev.map((o) => {
         if (o.id !== selected.id) return o;
+        // Sıfır stoklu ürün arayüzden gizlenir; storage_contents kaydı silinmez.
+        if (finalQuantity !== null && Number(finalQuantity) <= 0) {
+          return { ...o, products: o.products.filter((p) => p.id !== productId) };
+        }
         const exists = o.products.some((p) => p.id === productId);
         const nextProduct: ProductEntry = { id: productId, name: savedProduct?.name || productName.trim(), quantity: finalQuantity, unit: savedProduct?.unit_name || "adet" };
         return { ...o, products: exists ? o.products.map((p) => p.id === productId ? nextProduct : p) : [...o.products, nextProduct] };
@@ -584,9 +608,57 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     }
 
     const product: ProductEntry = { id: makeId(), name: productName.trim(), quantity: q, unit: "adet" };
-    setObjects((prev) => prev.map((o) => o.id === selected.id ? { ...o, products: [...o.products, product] } : o));
+    if (q !== 0) {
+      setObjects((prev) => prev.map((o) => o.id === selected.id ? { ...o, products: [...o.products, product] } : o));
+    }
     setProductName(""); setQuantity(""); setUnknownQuantity(false);
     setNotice(`${product.name}, ${selected.label} konumuna eklendi (yerel demo).`);
+  }
+
+  async function adjustProductQuantity(productId: string, delta: number) {
+    if (!selected || !Number.isInteger(delta) || delta === 0) return;
+    const product = selected.products.find((p) => p.id === productId);
+    if (!product) return;
+    if (product.quantity === null) {
+      setNotice("Önce ürünün miktarını belirlemelisin.");
+      return;
+    }
+
+    const nextQuantity = product.quantity + delta;
+    if (nextQuantity < 0) {
+      setNotice("Stok miktarı sıfırın altına düşemez.");
+      return;
+    }
+
+    if (supabase && organizationId) {
+      const unitId = storageUnitIds[selected.id];
+      if (!unitId) {
+        setNotice("Bu ürün için depolama konumu bulunamadı.");
+        return;
+      }
+      const { error } = await supabase
+        .from("storage_contents")
+        .update({ quantity: nextQuantity, updated_by: user?.id, updated_at: new Date().toISOString() })
+        .eq("storage_unit_id", unitId)
+        .eq("product_id", productId)
+        .eq("organization_id", organizationId);
+      if (error) {
+        setNotice(`Stok miktarı güncellenemedi: ${error.message}`);
+        return;
+      }
+    }
+
+    setObjects((prev) => prev.map((o) => {
+      if (o.id !== selected.id) return o;
+      if (nextQuantity === 0) {
+        return { ...o, products: o.products.filter((p) => p.id !== productId) };
+      }
+      return {
+        ...o,
+        products: o.products.map((p) => p.id === productId ? { ...p, quantity: nextQuantity } : p),
+      };
+    }));
+    setNotice(nextQuantity === 0 ? `${product.name} stoğu bitti ve listeden kaldırıldı.` : `${product.name} stok miktarı ${nextQuantity} ${product.unit} olarak güncellendi.`);
   }
 
   async function removeProduct(productId: string) {
@@ -910,7 +982,11 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
                 {selected.products.map((p) => (
                   <div className="product-row" key={p.id}>
                     <div className="product-symbol">P</div><div className="product-copy"><strong>{p.name}</strong><span>{p.quantity === null ? "Miktar bilinmiyor" : `${p.quantity} ${p.unit}`}</span></div>
-                    {canEditOperations && <button className="icon-button" title="Ürünü bu konumdan çıkar" onClick={() => removeProduct(p.id)}>×</button>}
+                    {canEditOperations && p.quantity !== null && <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      <button type="button" className="icon-button" title="Stoktan 1 azalt" aria-label={`${p.name} stoktan 1 azalt`} disabled={p.quantity <= 0} onClick={() => adjustProductQuantity(p.id, -1)} style={{ width: 30, height: 30, opacity: p.quantity <= 0 ? 0.45 : 1 }}>−</button>
+                      <button type="button" className="icon-button" title="Stoka 1 ekle" aria-label={`${p.name} stoğa 1 ekle`} onClick={() => adjustProductQuantity(p.id, 1)} style={{ width: 30, height: 30 }}>+</button>
+                    </div>}
+                    {canEditOperations && <button className="icon-button" title="Ürünü bu konumdan tamamen çıkar" aria-label={`${p.name} ürününü konumdan kaldır`} onClick={() => removeProduct(p.id)}>×</button>}
                   </div>
                 ))}
               </div>
