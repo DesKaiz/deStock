@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import { Stage, Layer, Rect, Text, Group, Line } from "react-konva";
 import type { MapObject, MapObjectType, ProductEntry } from "@/types/warehouse";
@@ -48,6 +49,41 @@ type DbWarehouse = {
   grid_size_m: number | string;
 };
 
+type DbStorageUnit = {
+  id: string;
+  map_object_id: string | null;
+  unit_type: string;
+  label: string;
+};
+
+type DbStorageContent = {
+  storage_unit_id: string;
+  product_id: string;
+  quantity: number | null;
+};
+
+type DbProduct = {
+  id: string;
+  name: string;
+  unit_name: string | null;
+};
+
+type DbMapObject = {
+  id: string;
+  object_type: string;
+  label: string;
+  x_m: number | string;
+  y_m: number | string;
+  width_m: number | string;
+  length_m: number | string;
+  rotation_deg: number | string;
+};
+
+type CreatedOrganization = {
+  organization_id?: string;
+  warehouse_id?: string;
+};
+
 type WarehousePatch = {
   name?: string;
   width_m?: number;
@@ -55,9 +91,19 @@ type WarehousePatch = {
   grid_size_m?: number;
 };
 
+type ActivityLog = {
+  id: string;
+  user_id: string | null;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
 export default function WarehouseApp() {
   const supabase = useMemo(() => (isCloudConfigured ? createClient() : null), []);
-  const [user, setUser] = useState<{ id: string; email?: string; inviteCode?: string } | null>(null);
+  const [user, setUser] = useState<{ id: string; email?: string; username?: string; inviteCode?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(isCloudConfigured));
   const [authBusy, setAuthBusy] = useState(false);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
@@ -83,7 +129,6 @@ export default function WarehouseApp() {
   const [membershipRole, setMembershipRole] = useState<string | null>(null);
   const [warehouseId, setWarehouseId] = useState<string | null>(null);
   const [storageUnitIds, setStorageUnitIds] = useState<Record<string, string>>({});
-  const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
   const [warehouseName, setWarehouseName] = useState("Ana Depo");
   const [widthM, setWidthM] = useState(12);
@@ -97,8 +142,34 @@ export default function WarehouseApp() {
   const [unknownQuantity, setUnknownQuantity] = useState(false);
   const [notice, setNotice] = useState(isCloudConfigured ? "Hesap bağlantısı bekleniyor." : "Yerel demo modu: değişiklikler buluta kaydedilmiyor.");
   const [showAllProducts, setShowAllProducts] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState("");
+  const [activityUserSearch, setActivityUserSearch] = useState("");
+  const [activityProductSearch, setActivityProductSearch] = useState("");
+  const [activityActionFilter, setActivityActionFilter] = useState("all");
+  const [activityDateFrom, setActivityDateFrom] = useState("");
+  const [activityDateTo, setActivityDateTo] = useState("");
   const canManageWarehouse = !isCloudConfigured || ["owner", "manager"].includes(membershipRole ?? "");
   const canEditOperations = !isCloudConfigured || ["owner", "manager", "worker"].includes(membershipRole ?? "");
+
+  const loadTeamMembers = useCallback(async (orgId: string) => {
+    if (!supabase) return;
+    setTeamLoading(true);
+    setTeamMessage("");
+    try {
+      const { data, error } = await supabase.rpc("depomap_list_members", {
+        p_organization_id: orgId,
+      });
+      if (error) throw error;
+      setTeamMembers((data ?? []) as Array<{ user_id: string; email: string | null; role: string; joined_at: string | null }>);
+    } catch (error) {
+      setTeamMessage(error instanceof Error ? error.message : "Ekip listesi yüklenemedi.");
+    } finally {
+      setTeamLoading(false);
+    }
+  }, [supabase]);
 
 // Oturum bilgisini al ve giriş/çıkış değişikliklerini dinle.
 useEffect(() => {
@@ -117,6 +188,7 @@ useEffect(() => {
       setUser({
         id: session.user.id,
         email: session.user.email,
+        username: typeof session.user.user_metadata?.username === "string" ? session.user.user_metadata.username : typeof session.user.user_metadata?.display_name === "string" ? session.user.user_metadata.display_name : undefined,
         inviteCode: typeof session.user.user_metadata?.depomap_invite_code === "string" ? session.user.user_metadata.depomap_invite_code : undefined,
       });
 
@@ -142,6 +214,7 @@ useEffect(() => {
           ? {
               id: session.user.id,
               email: session.user.email,
+              username: typeof session.user.user_metadata?.username === "string" ? session.user.user_metadata.username : typeof session.user.user_metadata?.display_name === "string" ? session.user.user_metadata.display_name : undefined,
               inviteCode: typeof session.user.user_metadata?.depomap_invite_code === "string" ? session.user.user_metadata.depomap_invite_code : undefined,
             }
           : null
@@ -179,7 +252,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     }
 
     let alive = true;
-    let channel: any = null;
+    let channel: RealtimeChannel | null = null;
 
     async function loadWarehouseData(orgId: string, whId: string) {
       const [warehouseResult, objectsResult, unitsResult, contentsResult, productsResult] = await Promise.all([
@@ -194,12 +267,14 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       if (firstError) throw firstError;
 
       const warehouse = warehouseResult.data as DbWarehouse;
-      const unitRows = unitsResult.data ?? [];
-      const productRows = productsResult.data ?? [];
+      const unitRows = (unitsResult.data ?? []) as DbStorageUnit[];
+      const productRows = (productsResult.data ?? []) as DbProduct[];
+      const contentRows = (contentsResult.data ?? []) as DbStorageContent[];
+      const objectRows = (objectsResult.data ?? []) as DbMapObject[];
       const contentsByUnit = new Map<string, Array<{ id: string; name: string; quantity: number | null; unit: string }>>();
-      const productById = new Map(productRows.map((p: any) => [p.id, p]));
-      for (const content of contentsResult.data ?? []) {
-        const product: any = productById.get(content.product_id);
+      const productById = new Map<string, DbProduct>(productRows.map((product) => [product.id, product]));
+      for (const content of contentRows) {
+        const product = productById.get(content.product_id);
         if (!product) continue;
         // Stok miktarı sıfır olan ürünler kayıtta kalır ancak aktif listelerde gösterilmez.
         if (content.quantity !== null && Number(content.quantity) <= 0) continue;
@@ -214,11 +289,11 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       }
 
       const unitIdByObject: Record<string, string> = {};
-      for (const unit of unitRows as any[]) {
+      for (const unit of unitRows) {
         if (unit.map_object_id) unitIdByObject[unit.map_object_id] = unit.id;
       }
       const unitIdByObjectReverse = new Map<string, string>(Object.entries(unitIdByObject));
-      const loadedObjects: MapObject[] = (objectsResult.data ?? []).map((row: any) => {
+      const loadedObjects: MapObject[] = objectRows.map((row) => {
         const unitId = unitIdByObjectReverse.get(row.id);
         return {
           id: row.id,
@@ -245,7 +320,6 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     }
 
     async function initialize() {
-      setDataLoading(true);
       setDataError(null);
       try {
         // Davet kodu varsa önce kodu kullan; üyelik bundan sonra kalıcıdır.
@@ -280,7 +354,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
             p_grid_size_m: 0.5
           });
           if (createError) throw createError;
-          const createdRow: any = Array.isArray(created) ? created[0] : created;
+          const createdRow = (Array.isArray(created) ? created[0] : created) as CreatedOrganization | null;
           orgId = createdRow?.organization_id;
           whId = createdRow?.warehouse_id;
           if (!orgId || !whId) throw new Error("Organizasyon oluşturuldu ancak depo kimliği alınamadı.");
@@ -316,6 +390,10 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         }
         await loadWarehouseData(orgId!, whId!);
 
+        if (!alive) return;
+
+        channel = supabase!.channel(`depomap-${orgId}-${whId}`)
+
         channel = supabase!.channel(`depomap-${orgId}-${whId}`)
           .on("postgres_changes", { event: "*", schema: "public", table: "map_objects", filter: `warehouse_id=eq.${whId}` }, () => { void loadWarehouseData(orgId!, whId!); })
           .on("postgres_changes", { event: "*", schema: "public", table: "storage_units", filter: `warehouse_id=eq.${whId}` }, () => { void loadWarehouseData(orgId!, whId!); })
@@ -331,8 +409,6 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
           setDataError(message);
           setNotice(`Bulut verileri yüklenemedi: ${message}`);
         }
-      } finally {
-        if (alive) setDataLoading(false);
       }
     }
 
@@ -341,7 +417,7 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
       alive = false;
       if (channel) void supabase.removeChannel(channel);
     };
-  }, [supabase, user?.id]);
+  }, [supabase, user, loadTeamMembers]);
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -428,23 +504,6 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     setAuthBusy(false);
   }
 }
-
-  async function loadTeamMembers(orgId: string) {
-    if (!supabase) return;
-    setTeamLoading(true);
-    setTeamMessage("");
-    try {
-      const { data, error } = await supabase.rpc("depomap_list_members", {
-        p_organization_id: orgId,
-      });
-      if (error) throw error;
-      setTeamMembers((data ?? []) as Array<{ user_id: string; email: string | null; role: string; joined_at: string | null }>);
-    } catch (error) {
-      setTeamMessage(error instanceof Error ? error.message : "Ekip listesi yüklenemedi.");
-    } finally {
-      setTeamLoading(false);
-    }
-  }
 
   async function handleRemoveMember(member: { user_id: string; email: string | null; role: string }) {
     if (!supabase || !organizationId) return;
@@ -583,6 +642,76 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     ? allProducts.filter((p) => p.name.toLocaleLowerCase("tr").includes(search.trim().toLocaleLowerCase("tr")))
     : [];
 
+  async function recordActivity(
+    action: string,
+    entityType: string,
+    entityId: string | null,
+    details: Record<string, unknown>
+  ) {
+    if (!supabase || !organizationId || !user) return;
+    const { error } = await supabase.from("audit_logs").insert({
+      organization_id: organizationId,
+      user_id: user.id,
+      action,
+      entity_type: entityType,
+      entity_id: entityId,
+      details: {
+        ...details,
+        actor_name: user.username || user.email || "Bilinmeyen kullanıcı",
+        actor_email: user.email || "Bilinmeyen kullanıcı",
+      },
+    });
+    if (error) {
+      setNotice(`İşlem yapıldı ancak işlem geçmişine yazılamadı: ${error.message}`);
+    }
+  }
+
+  async function loadActivityLogs() {
+    if (!supabase || !organizationId) return;
+    setActivityLoading(true);
+    setActivityError("");
+    const { data, error } = await supabase
+      .from("audit_logs")
+      .select("id,user_id,action,entity_type,entity_id,details,created_at")
+      .eq("organization_id", organizationId)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (error) {
+      setActivityError(error.message);
+      setActivityLogs([]);
+    } else {
+      setActivityLogs((data ?? []) as ActivityLog[]);
+    }
+    setActivityLoading(false);
+  }
+
+  const filteredActivityLogs = useMemo(() => {
+    const userQuery = activityUserSearch.trim().toLocaleLowerCase("tr");
+    const productQuery = activityProductSearch.trim().toLocaleLowerCase("tr");
+    return activityLogs.filter((log) => {
+      const details = log.details || {};
+      const actor = String(details.actor_email || details.actor_name || log.user_id || "").toLocaleLowerCase("tr");
+      const product = String(details.product_name || details.name || details.description || "").toLocaleLowerCase("tr");
+      const actionMatch = activityActionFilter === "all" || log.action === activityActionFilter;
+      const date = new Date(log.created_at);
+      const fromMatch = !activityDateFrom || date >= new Date(`${activityDateFrom}T00:00:00`);
+      const toMatch = !activityDateTo || date <= new Date(`${activityDateTo}T23:59:59.999`);
+      return (!userQuery || actor.includes(userQuery)) && (!productQuery || product.includes(productQuery)) && actionMatch && fromMatch && toMatch;
+    });
+  }, [activityLogs, activityUserSearch, activityProductSearch, activityActionFilter, activityDateFrom, activityDateTo]);
+
+  function activityActionLabel(action: string) {
+    const labels: Record<string, string> = {
+      product_add: "Ürün eklendi",
+      stock_add: "Stok artırıldı",
+      stock_remove: "Stok azaltıldı",
+      product_remove: "Ürün konumdan çıkarıldı",
+      object_add: "Konum eklendi",
+      object_remove: "Konum silindi",
+    };
+    return labels[action] || action;
+  }
+
   function updateWarehouse(patch: WarehousePatch) {
     if (patch.name !== undefined) setWarehouseName(patch.name);
     if (patch.width_m !== undefined) setWidthM(patch.width_m);
@@ -643,6 +772,13 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         setStorageUnitIds((prev) => ({ ...prev, [object.id]: unit.id }));
       }
     }
+    if (supabase && organizationId) {
+      await recordActivity("object_add", "map_object", object.id, {
+        object_label: object.label,
+        object_type: object.type,
+        description: `${object.label} konumu eklendi`,
+      });
+    }
     setObjects((prev) => [...prev, object]);
     setSelectedId(object.id);
     setNotice(`${object.label} eklendi${supabase ? " ve buluta kaydedildi." : " (yerel demo)."}`);
@@ -656,6 +792,14 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
     if (supabase && organizationId && warehouseId) {
       const { error } = await supabase.from("map_objects").delete().eq("id", id).eq("warehouse_id", warehouseId).eq("organization_id", organizationId);
       if (error) { setNotice(`Nesne silinemedi: ${error.message}`); return; }
+    }
+    if (supabase && organizationId) {
+      await recordActivity("object_remove", "map_object", id, {
+        object_label: target.label,
+        object_type: target.type,
+        description: `${target.label} konumu silindi`,
+        removed_products: target.products.map((product) => product.name),
+      });
     }
     setObjects((prev) => prev.filter((o) => o.id !== id));
     setStorageUnitIds((prev) => { const next = { ...prev }; delete next[id]; return next; });
@@ -709,6 +853,15 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         ? await supabase.from("storage_contents").update({ quantity: finalQuantity, updated_by: user?.id, updated_at: new Date().toISOString() }).eq("storage_unit_id", unitId).eq("product_id", productId)
         : await supabase.from("storage_contents").insert({ id: makeId(), organization_id: organizationId, warehouse_id: warehouseId, storage_unit_id: unitId, product_id: productId, quantity: finalQuantity, updated_by: user?.id });
       if (contentWrite.error) { setNotice(`Ürün depoya kaydedilemedi: ${contentWrite.error.message}`); return; }
+      await recordActivity(existingContent ? "stock_add" : "product_add", "product", productId, {
+        product_name: productName.trim(),
+        quantity: q,
+        previous_quantity: existingContent?.quantity ?? 0,
+        new_quantity: finalQuantity,
+        unit: "adet",
+        location: selected.label,
+        description: `${productName.trim()} ${selected.label} konumuna ${q === null ? "miktarı bilinmeden" : `${q} adet`} eklendi`,
+      });
       const { data: savedProduct } = await supabase.from("products").select("id,name,unit_name").eq("id", productId).single();
       setObjects((prev) => prev.map((o) => {
         if (o.id !== selected.id) return o;
@@ -764,6 +917,15 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         setNotice(`Stok miktarı güncellenemedi: ${error.message}`);
         return;
       }
+      await recordActivity(delta > 0 ? "stock_add" : "stock_remove", "product", productId, {
+        product_name: product.name,
+        quantity: Math.abs(delta),
+        previous_quantity: product.quantity,
+        new_quantity: nextQuantity,
+        unit: product.unit,
+        location: selected.label,
+        description: `${product.name} stoğu ${Math.abs(delta)} ${product.unit} ${delta > 0 ? "artırıldı" : "azaltıldı"} (${product.quantity} → ${nextQuantity})`,
+      });
     }
 
     setObjects((prev) => prev.map((o) => {
@@ -781,11 +943,20 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
 
   async function removeProduct(productId: string) {
     if (!selected) return;
+    const removedProduct = selected.products.find((product) => product.id === productId);
+    if (!removedProduct) return;
     if (supabase && organizationId) {
       const unitId = storageUnitIds[selected.id];
       if (!unitId) { setNotice("Bu ürün için depolama konumu bulunamadı."); return; }
       const { error } = await supabase.from("storage_contents").delete().eq("storage_unit_id", unitId).eq("product_id", productId).eq("organization_id", organizationId);
       if (error) { setNotice(`Ürün konumdan çıkarılamadı: ${error.message}`); return; }
+      await recordActivity("product_remove", "product", productId, {
+        product_name: removedProduct.name,
+        quantity: removedProduct.quantity,
+        unit: removedProduct.unit,
+        location: selected.label,
+        description: `${removedProduct.name} ${selected.label} konumundan çıkarıldı`,
+      });
     }
     setObjects((prev) => prev.map((o) => o.id === selected.id ? { ...o, products: o.products.filter((p) => p.id !== productId) } : o));
     setNotice("Ürün bu konumdan çıkarıldı.");
@@ -951,6 +1122,14 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
         >
           Ürün listesi ({allProducts.length})
         </button>
+        {canManageWarehouse && supabase && <button
+          type="button"
+          className="secondary-button"
+          onClick={() => { setShowActivity(true); void loadActivityLogs(); }}
+          style={{ marginRight: 12, whiteSpace: "nowrap" }}
+        >
+          İşlemler
+        </button>}
         {isCloudConfigured ? <><span className={`status-pill ${dataError ? "status-warn" : ""}`}>{dataError ? "Bulut hatası" : "Bulut bağlantısı"}</span><button type="button" className="secondary-button" onClick={signOut}>Çıkış yap</button><button type="button" className="secondary-button" onClick={() => { setAccountDeleteError(""); setAccountDeleteStep(1); }} style={{ color: "#ff6b73", borderColor: "#71313a" }}>Hesabımı sil</button></> : <span className="status-pill status-warn">Yerel demo · bulut ayarı yok</span>}
       </header>
 
@@ -1262,6 +1441,54 @@ if (event === "USER_UPDATED" && session?.user.user_metadata?.password_set) {
             <p style={{ color: "#aeb3bd", fontSize: 12, marginTop: 16 }}>
               Bir ürüne tıklayarak haritada bulunduğu palet, raf veya arabayı seçebilirsin.
             </p>
+          </section>
+        </div>
+      )}
+
+      {showActivity && (
+        <div
+          role="presentation"
+          onClick={() => setShowActivity(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 1150, background: "rgba(0,0,0,.76)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="activity-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(1050px, 100%)", maxHeight: "min(88vh, 900px)", overflow: "auto", background: "#14161b", color: "#f2f3f5", border: "1px solid #343944", borderRadius: 16, padding: 22, boxShadow: "0 24px 80px rgba(0,0,0,.5)" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 18 }}>
+              <div><span className="panel-kicker">RAPORLAMA / İSTATİSTİKLER</span><h2 id="activity-title" style={{ margin: "4px 0 0" }}>İşlem geçmişi</h2><p className="helper-text" style={{ margin: "5px 0 0" }}>Son 500 işlem · {filteredActivityLogs.length} sonuç</p></div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" className="secondary-button" onClick={() => void loadActivityLogs()} disabled={activityLoading}>Yenile</button>
+                <button type="button" className="icon-button" aria-label="İşlem geçmişini kapat" onClick={() => setShowActivity(false)} style={{ fontSize: 22 }}>×</button>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10, marginBottom: 16 }}>
+              <label className="field-label">Kullanıcı ara<input placeholder="Kullanıcı adı, e-posta veya kimlik" value={activityUserSearch} onChange={(e) => setActivityUserSearch(e.target.value)} /></label>
+              <label className="field-label">Ürün ara<input placeholder="Örn. ekmek" value={activityProductSearch} onChange={(e) => setActivityProductSearch(e.target.value)} /></label>
+              <label className="field-label">İşlem türü<select value={activityActionFilter} onChange={(e) => setActivityActionFilter(e.target.value)}><option value="all">Tüm işlemler</option><option value="product_add">Ürün eklendi</option><option value="stock_add">Stok artırıldı</option><option value="stock_remove">Stok azaltıldı</option><option value="product_remove">Ürün konumdan çıkarıldı</option><option value="object_add">Konum eklendi</option><option value="object_remove">Konum silindi</option></select></label>
+              <label className="field-label">Başlangıç tarihi<input type="date" value={activityDateFrom} onChange={(e) => setActivityDateFrom(e.target.value)} /></label>
+              <label className="field-label">Bitiş tarihi<input type="date" value={activityDateTo} onChange={(e) => setActivityDateTo(e.target.value)} /></label>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}><button type="button" className="secondary-button" onClick={() => { setActivityUserSearch(""); setActivityProductSearch(""); setActivityActionFilter("all"); setActivityDateFrom(""); setActivityDateTo(""); }}>Filtreleri temizle</button></div>
+            {activityError && <p role="alert" style={{ color: "#ff8a91" }}>İşlemler yüklenemedi: {activityError}</p>}
+            {activityLoading ? <p className="empty-state">İşlem geçmişi yükleniyor...</p> : filteredActivityLogs.length === 0 ? <p className="empty-state">Bu filtrelerle eşleşen işlem bulunamadı.</p> : (
+              <div style={{ display: "grid", gap: 9 }}>
+                {filteredActivityLogs.map((log) => {
+                  const details = log.details || {};
+                  const actor = String(details.actor_email || details.actor_name || log.user_id || "Bilinmeyen kullanıcı");
+                  const description = String(details.description || details.product_name || details.object_label || activityActionLabel(log.action));
+                  const quantityText = details.quantity === null || details.quantity === undefined ? "" : ` · ${String(details.quantity)} ${String(details.unit || "adet")}`;
+                  return <article key={log.id} style={{ display: "grid", gridTemplateColumns: "minmax(150px,1fr) minmax(180px,2fr) auto", alignItems: "center", gap: 12, padding: 13, border: "1px solid #343944", borderRadius: 10, background: "#1b1e25" }}>
+                    <div style={{ minWidth: 0 }}><strong style={{ display: "block", overflowWrap: "anywhere" }}>{actor}</strong><small style={{ color: "#9da4b1" }}>{new Date(log.created_at).toLocaleString("tr-TR")}</small></div>
+                    <div style={{ minWidth: 0 }}><strong>{activityActionLabel(log.action)}</strong><div style={{ color: "#c3c7cf", fontSize: 13, overflowWrap: "anywhere" }}>{description}{quantityText}{details.location ? ` · ${String(details.location)}` : ""}</div></div>
+                    <small style={{ color: "#858b98", textAlign: "right" }}>{log.entity_type}</small>
+                  </article>;
+                })}
+              </div>
+            )}
           </section>
         </div>
       )}

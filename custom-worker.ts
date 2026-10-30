@@ -1,5 +1,3 @@
-
-// @ts-expect-error Bu dosya OpenNext derlemesi sırasında oluşturulur.
 import handler from "./.open-next/worker.js";
 
 interface Env {
@@ -36,5 +34,5 @@ export default {
   },
 };
 
-// @ts-expect-error Bu dosya OpenNext derlemesi sırasında oluşturulur.
+
 export { DOQueueHandler, DOShardedTagCache } from "./.open-next/worker.js";

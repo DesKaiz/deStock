@@ -1,8 +1,32 @@
-
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+
+async function getServerEnv(): Promise<Record<string, string | undefined>> {
+  let env: Record<string, string | undefined> = process.env;
+
+  try {
+    const context = await getCloudflareContext();
+    env = context.env as Record<string, string | undefined>;
+  } catch {
+    // Yerel Next.js geliştirme ortamında .env.local kullanılır.
+  }
+
+  return env;
+}
+
+function isMissingAuthUser(
+  error: { message?: string; code?: string } | null,
+): boolean {
+  if (!error) return false;
+
+  return (
+    error.code === "user_not_found" ||
+    /not found|does not exist|user_not_found/i.test(error.message ?? "")
+  );
+}
 
 export async function POST(request: NextRequest) {
   const authorization = request.headers.get("authorization") || "";
@@ -11,7 +35,10 @@ export async function POST(request: NextRequest) {
     : "";
 
   if (!accessToken) {
-    return NextResponse.json({ error: "Oturum doğrulanamadı." }, { status: 401 });
+    return NextResponse.json(
+      { error: "Oturum doğrulanamadı." },
+      { status: 401 },
+    );
   }
 
   let body: { organizationId?: string; confirmation?: string };
@@ -19,56 +46,89 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Geçersiz istek." }, { status: 400 });
+    return NextResponse.json(
+      { error: "Geçersiz istek." },
+      { status: 400 },
+    );
   }
 
   const organizationId = body.organizationId;
 
-  if (
-    !organizationId ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(organizationId)
-  ) {
-    return NextResponse.json({ error: "Geçerli işletme kimliği gerekli." }, { status: 400 });
+  const uuidPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  if (!organizationId || !uuidPattern.test(organizationId)) {
+    return NextResponse.json(
+      { error: "Geçerli işletme kimliği gerekli." },
+      { status: 400 },
+    );
   }
 
   if (body.confirmation !== "CLOSE_ORGANIZATION") {
-    return NextResponse.json({ error: "İşletme kapatma onayı eksik." }, { status: 400 });
+    return NextResponse.json(
+      { error: "İşletme kapatma onayı eksik." },
+      { status: 400 },
+    );
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  const secretKey = process.env.SUPABASE_SECRET_KEY;
+  const env = await getServerEnv();
+
+  const url = env.NEXT_PUBLIC_SUPABASE_URL;
+  const publishableKey = env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  const secretKey = env.SUPABASE_SECRET_KEY;
 
   if (!url || !publishableKey || !secretKey) {
-    return NextResponse.json({ error: "Sunucu ayarları eksik." }, { status: 500 });
+    return NextResponse.json(
+      { error: "Sunucu ayarları eksik." },
+      { status: 500 },
+    );
   }
 
   const authClient = createClient(url, publishableKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
   });
 
   const admin = createClient(url, secretKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
   });
 
   const { data: authData, error: authError } =
     await authClient.auth.getUser(accessToken);
 
   if (authError || !authData.user) {
-    return NextResponse.json({ error: "Oturum geçersiz." }, { status: 401 });
+    return NextResponse.json(
+      { error: "Oturum geçersiz." },
+      { status: 401 },
+    );
   }
 
   const ownerId = authData.user.id;
 
-  const { data: existingJob, error: existingJobError } = await admin
+  const {
+    data: existingJob,
+    error: existingJobError,
+  } = await admin
     .from("organization_closure_jobs")
     .select("id, requested_by, user_ids, deleted_user_ids, status")
     .eq("organization_id", organizationId)
     .maybeSingle();
 
   if (existingJobError) {
-    return NextResponse.json({ error: existingJobError.message }, { status: 500 });
+    return NextResponse.json(
+      { error: existingJobError.message },
+      { status: 500 },
+    );
   }
 
   if (existingJob && existingJob.requested_by !== ownerId) {
@@ -88,7 +148,10 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
 
     if (orgError) {
-      return NextResponse.json({ error: orgError.message }, { status: 500 });
+      return NextResponse.json(
+        { error: orgError.message },
+        { status: 500 },
+      );
     }
 
     if (!org || org.owner_id !== ownerId) {
@@ -106,12 +169,18 @@ export async function POST(request: NextRequest) {
     }
 
     if (org.status === "active") {
-      const { error } = await authClient.rpc("depomap_begin_org_closure", {
-        p_organization_id: organizationId,
-      });
+      const { error } = await authClient.rpc(
+        "depomap_begin_org_closure",
+        {
+          p_organization_id: organizationId,
+        },
+      );
 
       if (error) {
-        return NextResponse.json({ error: error.message }, { status: 400 });
+        return NextResponse.json(
+          { error: error.message },
+          { status: 400 },
+        );
       }
     }
 
@@ -125,7 +194,10 @@ export async function POST(request: NextRequest) {
 
     if (createError || !jobId) {
       return NextResponse.json(
-        { error: createError?.message || "İş kaydı oluşturulamadı." },
+        {
+          error:
+            createError?.message || "İş kaydı oluşturulamadı.",
+        },
         { status: 500 },
       );
     }
@@ -164,12 +236,18 @@ export async function POST(request: NextRequest) {
   );
 
   if (lockError) {
-    return NextResponse.json({ error: lockError.message }, { status: 500 });
+    return NextResponse.json(
+      { error: lockError.message },
+      { status: 500 },
+    );
   }
 
   if (!lockAcquired) {
     return NextResponse.json(
-      { error: "Başka bir kapatma işlemi devam ediyor. Biraz sonra tekrar deneyin." },
+      {
+        error:
+          "Başka bir kapatma işlemi devam ediyor. Biraz sonra tekrar deneyin.",
+      },
       { status: 409 },
     );
   }
@@ -186,7 +264,8 @@ export async function POST(request: NextRequest) {
 
       if (error || !data) {
         throw new Error(
-          error?.message || "İşlem kilidi yenilenemedi. Güvenlik için işlem durduruldu.",
+          error?.message ||
+            "İşlem kilidi yenilenemedi. Güvenlik için işlem durduruldu.",
         );
       }
     };
@@ -199,7 +278,9 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (freshJobError || !freshJob) {
-      throw new Error(freshJobError?.message || "İş kaydı okunamadı.");
+      throw new Error(
+        freshJobError?.message || "İş kaydı okunamadı.",
+      );
     }
 
     if (freshJob.status === "completed") {
@@ -209,8 +290,14 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const userIds = freshJob.user_ids as string[];
-    const deleted = new Set<string>(freshJob.deleted_user_ids || []);
+    // İşletme sahibini de silinecek kullanıcı listesine ekle.
+    const userIds = Array.from(
+      new Set([...(freshJob.user_ids ?? []), ownerId]),
+    );
+
+    const deleted = new Set<string>(
+      freshJob.deleted_user_ids || [],
+    );
 
     const { data: org, error: orgReadError } = await admin
       .from("organizations")
@@ -218,13 +305,40 @@ export async function POST(request: NextRequest) {
       .eq("id", organizationId)
       .maybeSingle();
 
-    if (orgReadError) throw new Error(orgReadError.message);
+    if (orgReadError) {
+      throw new Error(orgReadError.message);
+    }
 
     if (org) {
       if (org.owner_id !== ownerId || org.status !== "closing") {
-        throw new Error("İşletme kapatma durumu doğrulanamadı.");
+        throw new Error(
+          "İşletme kapatma durumu doğrulanamadı.",
+        );
       }
+    }
 
+    const { data: processingJob, error: processingError } =
+      await admin
+        .from("organization_closure_jobs")
+        .update({
+          status: "processing",
+          failed_user_ids: [],
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", job.id)
+        .eq("lock_token", lockToken)
+        .select("id")
+        .maybeSingle();
+
+    if (processingError || !processingJob) {
+      throw new Error(
+        processingError?.message || "İşlem kilidi kaybedildi.",
+      );
+    }
+
+    // İşletme verilerini sil. Kapatma işi kaydı bu işlemden bağımsızdır.
+    if (org) {
       await renewLock();
 
       const { error: deleteOrgError } = await admin
@@ -233,36 +347,37 @@ export async function POST(request: NextRequest) {
         .eq("id", organizationId)
         .eq("owner_id", ownerId);
 
-      if (deleteOrgError) throw new Error(deleteOrgError.message);
-    }
-
-    const { data: processingJob, error: processingError } = await admin
-      .from("organization_closure_jobs")
-      .update({
-        status: "processing",
-        failed_user_ids: [],
-        error_message: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", job.id)
-      .eq("lock_token", lockToken)
-      .select("id")
-      .maybeSingle();
-
-    if (processingError || !processingJob) {
-      throw new Error(processingError?.message || "İşlem kilidi kaybedildi.");
+      if (deleteOrgError) {
+        throw new Error(deleteOrgError.message);
+      }
     }
 
     const workers = userIds.filter((id) => id !== ownerId);
 
+    // Önce çalışan hesaplarını sil.
     for (const userId of workers) {
       if (deleted.has(userId)) continue;
 
       await renewLock();
 
-      const { error } = await admin.auth.admin.deleteUser(userId);
+      // Auth hesabını silmeden önce uygulama kayıtlarını temizle.
+      const { error: cleanupError } = await admin.rpc(
+        "depomap_prepare_account_deletion",
+        {
+          p_user_id: userId,
+        },
+      );
 
-      if (error && !/not found|does not exist|user_not_found/i.test(error.message)) {
+      if (cleanupError) {
+        throw new Error(
+          `Çalışan hesabı ilişkili kayıtları temizlenemedi: ${cleanupError.message}`,
+        );
+      }
+
+      const { error: deleteError } =
+        await admin.auth.admin.deleteUser(userId);
+
+      if (deleteError && !isMissingAuthUser(deleteError)) {
         await admin
           .from("organization_closure_jobs")
           .update({
@@ -271,7 +386,7 @@ export async function POST(request: NextRequest) {
               ...workers.filter((id) => !deleted.has(id)),
               ownerId,
             ],
-            error_message: error.message,
+            error_message: deleteError.message,
             updated_at: new Date().toISOString(),
           })
           .eq("id", job.id)
@@ -279,7 +394,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json(
           {
-            error: "Bir çalışan hesabı silinemedi. Yeniden deneyerek devam edebilirsiniz.",
+            error:
+              "Bir çalışan hesabı silinemedi. Yeniden deneyerek devam edebilirsiniz.",
           },
           { status: 500 },
         );
@@ -287,34 +403,52 @@ export async function POST(request: NextRequest) {
 
       deleted.add(userId);
 
-      const { data: progressJob, error: progressError } = await admin
-        .from("organization_closure_jobs")
-        .update({
-          deleted_user_ids: Array.from(deleted),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", job.id)
-        .eq("lock_token", lockToken)
-        .select("id")
-        .maybeSingle();
+      const { data: progressJob, error: progressError } =
+        await admin
+          .from("organization_closure_jobs")
+          .update({
+            deleted_user_ids: Array.from(deleted),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id)
+          .eq("lock_token", lockToken)
+          .select("id")
+          .maybeSingle();
 
       if (progressError || !progressJob) {
-        throw new Error(progressError?.message || "İşlem kilidi kaybedildi.");
+        throw new Error(
+          progressError?.message || "İşlem kilidi kaybedildi.",
+        );
       }
     }
 
+    // İşletme sahibini en son sil.
     if (!deleted.has(ownerId)) {
       await renewLock();
 
-      const { error } = await admin.auth.admin.deleteUser(ownerId);
+      const { error: cleanupError } = await admin.rpc(
+        "depomap_prepare_account_deletion",
+        {
+          p_user_id: ownerId,
+        },
+      );
 
-      if (error && !/not found|does not exist|user_not_found/i.test(error.message)) {
+      if (cleanupError) {
+        throw new Error(
+          `İşletme sahibi hesabı ilişkili kayıtları temizlenemedi: ${cleanupError.message}`,
+        );
+      }
+
+      const { error: deleteError } =
+        await admin.auth.admin.deleteUser(ownerId);
+
+      if (deleteError && !isMissingAuthUser(deleteError)) {
         await admin
           .from("organization_closure_jobs")
           .update({
             status: "failed",
             failed_user_ids: [ownerId],
-            error_message: error.message,
+            error_message: deleteError.message,
             updated_at: new Date().toISOString(),
           })
           .eq("id", job.id)
@@ -329,22 +463,25 @@ export async function POST(request: NextRequest) {
       deleted.add(ownerId);
     }
 
-    const { data: completedJob, error: completeError } = await admin
-      .from("organization_closure_jobs")
-      .update({
-        deleted_user_ids: Array.from(deleted),
-        failed_user_ids: [],
-        status: "completed",
-        error_message: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", job.id)
-      .eq("lock_token", lockToken)
-      .select("id")
-      .maybeSingle();
+    const { data: completedJob, error: completeError } =
+      await admin
+        .from("organization_closure_jobs")
+        .update({
+          deleted_user_ids: Array.from(deleted),
+          failed_user_ids: [],
+          status: "completed",
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", job.id)
+        .eq("lock_token", lockToken)
+        .select("id")
+        .maybeSingle();
 
     if (completeError || !completedJob) {
-      throw new Error(completeError?.message || "İşlem kilidi kaybedildi.");
+      throw new Error(
+        completeError?.message || "İşlem kilidi kaybedildi.",
+      );
     }
 
     return NextResponse.json({
@@ -352,7 +489,10 @@ export async function POST(request: NextRequest) {
       message: "İşletme ve bağlı kullanıcı hesapları silindi.",
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Bilinmeyen hata.";
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Bilinmeyen hata.";
 
     await admin
       .from("organization_closure_jobs")
@@ -364,7 +504,10 @@ export async function POST(request: NextRequest) {
       .eq("id", job.id)
       .eq("lock_token", lockToken);
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: message },
+      { status: 500 },
+    );
   } finally {
     await admin.rpc("depomap_release_closure_lock", {
       p_job_id: job.id,
